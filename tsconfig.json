@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@dsh-memory/ports": ["packages/memory-ports/src/index.ts"],
+      "@dsh-memory/core": ["packages/memory-core/src/index.ts"],
+      "@dsh-memory/storage-sqlite": ["packages/memory-storage-sqlite/src/index.ts"],
+      "@dsh-memory/adapter-dsh": ["packages/memory-adapter-dsh/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "conformance/**/*.ts"]
+}
