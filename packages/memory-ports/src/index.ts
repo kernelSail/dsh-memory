@@ -151,6 +151,9 @@ export interface StoragePort {
   getConflictGroup(groupId: string): ConflictGroup | null
   listConflictsByTopic(topicId: string): ConflictGroup[]
   setConflictWinner(groupId: string, winnerMemoryId: string | null, policy: ConflictPolicy, reason: string): void
+
+  /** 墓碑删除：置 deleted_at / TOMBSTONED，保留 tombstone_hash（§18） */
+  forgetMemory(memoryId: string, meta: { deletedAt: string; deletedBy: string; deleteReason: string; tombstoneHash: string }): void
 }
 
 export interface LLMRequest {

@@ -133,6 +133,19 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX IF NOT EXISTS ix_conflict_topic ON conflict_group(topic_id, fact_key);
   `,
+  `
+  CREATE TABLE IF NOT EXISTS memory_dependency (
+    source_memory_id TEXT NOT NULL,
+    dependent_type   TEXT NOT NULL,
+    dependent_id     TEXT NOT NULL,
+    PRIMARY KEY (source_memory_id, dependent_type, dependent_id)
+  );
+  CREATE INDEX IF NOT EXISTS ix_dependency_dependent ON memory_dependency(dependent_type, dependent_id);
+  `,
+  `
+  ALTER TABLE memory ADD COLUMN deleted_by TEXT;
+  ALTER TABLE memory ADD COLUMN delete_reason TEXT;
+  `,
 ]
 
 export interface OpenOptions {
@@ -533,6 +546,18 @@ export class SqliteStorage implements StoragePort {
     this.db
       .prepare('UPDATE conflict_group SET winner_memory_id = ?, policy = ?, reason = ?, decided_at = ? WHERE conflict_group_id = ?')
       .run(winnerMemoryId, policy, reason, new Date().toISOString(), groupId)
+  }
+
+  forgetMemory(
+    memoryId: string,
+    meta: { deletedAt: string; deletedBy: string; deleteReason: string; tombstoneHash: string },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE memory SET status = 'TOMBSTONED', deleted_at = ?, deleted_by = ?, delete_reason = ?,
+         tombstone_hash = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(meta.deletedAt, meta.deletedBy, meta.deleteReason, meta.tombstoneHash, meta.deletedAt, memoryId)
   }
 
   close(): void {
