@@ -42,6 +42,8 @@ export interface MemoryCandidate {
   sourceRefs?: string[]
   confidence?: number
   importance?: number
+  /** 写入意图：correct = 用户显式纠正（旧值取代）；assert = 普通陈述（可能形成冲突） */
+  intent?: 'assert' | 'correct'
 }
 
 export interface MemoryRecord {
@@ -102,6 +104,24 @@ export interface PendingEntry {
   noveltyScore: number
 }
 
+export type SummaryStatus = 'DRAFT' | 'VALIDATED' | 'ACTIVE' | 'STALE' | 'SUPERSEDED' | 'DISCARDED'
+
+export interface SummaryRecord {
+  summaryId: string
+  tenantId: string
+  topicId: string
+  content: string
+  version: number
+  status: SummaryStatus
+  generationDepth: number
+  sourceMemoryIds: string[]
+  pendingMemoryIds: string[]
+  summarizedThrough: string | null
+  compressionMetrics: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface StoragePort {
   /** 单写者事务；失败回滚 */
   tx<T>(fn: () => T): T
@@ -118,6 +138,19 @@ export interface StoragePort {
   pendingNovelty(topicId: string): number
   pendingMemoryIds(topicId: string): string[]
   clearPending(topicId: string, memoryIds: string[]): void
+
+  insertSummary(record: SummaryRecord): void
+  getSummary(summaryId: string): SummaryRecord | null
+  getActiveSummary(topicId: string): SummaryRecord | null
+  updateSummaryStatus(summaryId: string, status: SummaryStatus): void
+  /** CAS 激活：仅当仍为 DRAFT 且版本匹配；成功则旧 ACTIVE 置 SUPERSEDED */
+  activateSummary(summaryId: string, expectedVersion: number): boolean
+  markSummaryStale(topicId: string): void
+
+  createConflictGroup(group: ConflictGroup): void
+  getConflictGroup(groupId: string): ConflictGroup | null
+  listConflictsByTopic(topicId: string): ConflictGroup[]
+  setConflictWinner(groupId: string, winnerMemoryId: string | null, policy: ConflictPolicy, reason: string): void
 }
 
 export interface LLMRequest {
@@ -148,6 +181,20 @@ export interface AuditPort {
   append(entry: AuditEntry): Promise<void>
 }
 
+export type ConflictPolicy = 'TEMPORAL' | 'SOURCE_PRIORITY' | 'CONFIDENCE' | 'LATEST' | 'UNRESOLVED'
+
+export interface ConflictGroup {
+  groupId: string
+  tenantId: string
+  topicId: string
+  factKey: string
+  memberMemoryIds: string[]
+  winnerMemoryId: string | null
+  policy: ConflictPolicy
+  decidedAt: string | null
+  reason: string
+}
+
 /** 注入主上下文的记忆上下文 */
 export interface MemoryContext {
   topicId: string | null
@@ -157,6 +204,14 @@ export interface MemoryContext {
     modality: Modality
     importance: number
     sourceRefs: string[]
+  }>
+  conflicts: Array<{
+    groupId: string
+    factKey: string
+    memberMemoryIds: string[]
+    winnerMemoryId: string | null
+    status: 'RESOLVED' | 'UNRESOLVED'
+    reason: string
   }>
   tokensUsed: number
   degraded: boolean
