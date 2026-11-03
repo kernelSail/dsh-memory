@@ -1,6 +1,7 @@
 import type {
   AuditPort,
   ClockPort,
+  ConflictGroup,
   MemoryCandidate,
   MemoryDecision,
   MemoryRecord,
@@ -10,6 +11,7 @@ import type {
 import { contextHashOf, factKeyOf, normalizeEntity, normalizeText, normalizeValue, shortHash, valueHashOf } from './normalize.js'
 import { decide } from './decide.js'
 import { assertTransition } from './state.js'
+import { resolveConflict } from './conflict.js'
 
 export interface IngestDeps {
   storage: StoragePort
@@ -117,14 +119,42 @@ export function ingestCandidate(candidate: MemoryCandidate, deps: IngestDeps): I
       deps.storage.updateMemoryStatus(record.id, 'ACTIVE', { updatedAt: now.toISOString() })
     }
 
-    // 修正：同上下文旧值置 SUPERSEDED，保留历史来源（§6.3 第 4 条）
+    // 修正 vs 冲突（§6.2 / §11.4.1）：
+    // - 用户显式纠正（intent=correct）→ 旧值 SUPERSEDED
+    // - 工具/助手观察（intent=assert）→ 保留双方，建 conflict_group 并裁决
     if (decision.decision === 'CORRECTION') {
-      for (const old of activeSameFactKey.filter((m) => m.contextHash === record.contextHash)) {
-        assertTransition('ACTIVE', 'SUPERSEDED')
-        deps.storage.updateMemoryStatus(old.id, 'SUPERSEDED', {
-          supersededBy: record.id,
-          updatedAt: now.toISOString(),
-        })
+      const overlapping = activeSameFactKey.filter((m) => m.contextHash === record.contextHash)
+      const intent =
+        candidate.intent
+        ?? (record.sourceSpeaker === 'tool' || record.sourceSpeaker === 'assistant' || record.sourceSpeaker === 'imported'
+          ? 'assert'
+          : 'correct')
+
+      if (intent === 'correct') {
+        for (const old of overlapping) {
+          assertTransition('ACTIVE', 'SUPERSEDED')
+          deps.storage.updateMemoryStatus(old.id, 'SUPERSEDED', {
+            supersededBy: record.id,
+            updatedAt: now.toISOString(),
+          })
+        }
+      } else if (overlapping.length > 0) {
+        const members: MemoryRecord[] = [...overlapping, record]
+        const resolution = resolveConflict(members)
+        const group: ConflictGroup = {
+          groupId: `cg_${shortHash([record.topicId, record.factKey, ...members.map((m) => m.id)].join('|'))}`,
+          tenantId: record.tenantId,
+          topicId: record.topicId,
+          factKey: record.factKey,
+          memberMemoryIds: members.map((m) => m.id),
+          winnerMemoryId: resolution.winnerMemoryId,
+          policy: resolution.policy,
+          decidedAt: now.toISOString(),
+          reason: resolution.reason,
+        }
+        deps.storage.createConflictGroup(group)
+        // 冲突不得进入摘要的确定性表述（§11.4.1 硬约束 2）
+        deps.storage.markSummaryStale(record.topicId)
       }
     }
 

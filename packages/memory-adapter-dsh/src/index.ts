@@ -80,7 +80,7 @@ export function createMemoryAdapter(host: MemoryHost, config: MemoryPluginConfig
         })
       } catch (error) {
         host.log?.('warn', `memory retrieve degraded: ${String(error)}`)
-        return { topicId: topicId ?? null, memories: [], tokensUsed: 0, degraded: true }
+        return { topicId: topicId ?? null, memories: [], conflicts: [], tokensUsed: 0, degraded: true }
       }
     },
 
