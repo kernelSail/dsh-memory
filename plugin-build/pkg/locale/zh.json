@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "记忆插件",
+    "description": "长期记忆：对话后自动提取事实、去重、增量总结与冲突裁决；提供 memory_search / memory_write 工具，支持主题分类、批量提取与有效时间窗。"
+  }
+}

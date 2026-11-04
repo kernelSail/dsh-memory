@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Memory Plugin",
+    "description": "Long-term memory: extracts facts from turns, deduplicates, summarizes incrementally, and resolves conflicts. Exposes memory_search / memory_write tools with topic classification, batch extraction, and validity windows."
+  }
+}

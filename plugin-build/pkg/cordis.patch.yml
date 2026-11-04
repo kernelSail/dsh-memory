@@ -1,0 +1,12 @@
+# dsh-memory-plugin bundle layer: registers the long-term memory plugin
+# into the host Cordis loader. The package itself carries the implementation
+# in lib/index.js (bundled ESM); all memory logic lives in the dsh-memory repo.
+- insert:
+    - id: dsh-memory-plugin
+      name: dsh-memory-plugin
+      config:
+        dbPath: "D:/study/deepseek-work/dsh-memory/live-memory.db"
+        defaultTopicId: "default"
+        provider: "deepseek-account"
+        model: "deepseek-flash"
+        extractBatchTurns: 4
