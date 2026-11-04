@@ -149,6 +149,8 @@ function MemorySection(props) {
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState('')
   const [lastRefresh, setLastRefresh] = React.useState('')
+  // 默认进空间视图；列表视图留给大量数据/精确操作
+  const [mode, setMode] = React.useState('space')
 
   const load = React.useCallback(
     async (options) => {
@@ -257,6 +259,26 @@ function MemorySection(props) {
         includeDeleted ? '含已删除' : '仅活跃',
       ),
       h('a', { style: { ...styles.button, textDecoration: 'none' }, href: API + '/export', download: 'memories.ndjson' }, '导出 NDJSON'),
+      h(
+        'div',
+        { style: { display: 'flex', gap: 4, marginLeft: 'auto' } },
+        h(
+          'button',
+          {
+            style: mode === 'space' ? { ...styles.button, ...styles.chipActive } : styles.button,
+            onClick: () => setMode('space'),
+          },
+          '空间',
+        ),
+        h(
+          'button',
+          {
+            style: mode === 'list' ? { ...styles.button, ...styles.chipActive } : styles.button,
+            onClick: () => setMode('list'),
+          },
+          '列表',
+        ),
+      ),
     ),
     topics.length > 0
       ? h(
@@ -290,19 +312,569 @@ function MemorySection(props) {
         )
       : null,
     error ? h('div', { style: styles.error }, error) : null,
+    mode === 'space'
+      ? h(MemorySpace, { query, topicId, includeDeleted })
+      : [
+          h(
+            'div',
+            { key: 'list', style: styles.list },
+            memories.length === 0 && !loading
+              ? h('div', { style: styles.empty }, query || topicId ? '没有匹配的记忆' : '还没有记忆。对话几轮后会自动提取。')
+              : memories.map((memory) => h(MemoryCard, { key: memory.memoryId, memory, busy, onForget, onPurge })),
+          ),
+          h(
+            'div',
+            { key: 'footer', style: styles.footer },
+            h('span', null, `共 ${memories.length} 条${stats ? ` / 库内 ${stats.total} 条` : ''}`),
+            stats && stats.lastUpdated ? h('span', null, `最新写入 ${formatTime(stats.lastUpdated)}`) : null,
+          ),
+        ],
+  )
+}
+
+// ---------------- 3D 空间视图（伪 3D，Canvas 2D 透视投影） ----------------
+
+const SPACE_DEFAULTS = { yaw: 0.45, pitch: 0.22, zoom: 1, panX: 0, panY: 0 }
+
+function seededRandom(seed) {
+  let state = (seed >>> 0) || 1
+  return () => {
+    state ^= state << 13
+    state >>>= 0
+    state ^= state >> 17
+    state ^= state << 5
+    state >>>= 0
+    return state / 4294967296
+  }
+}
+
+function nodeRadius(node, scale) {
+  const base = node.kind === 'memory' ? 2.6 + Math.min(1, Number(node.importance ?? 0.5)) * 4.2 : node.kind === 'entity' ? 4.4 : 5.2
+  return Math.max(1.6, Math.min(14, base * (0.85 + scale * 0.5)))
+}
+
+function buildLayout(graph) {
+  const random = seededRandom(20261104)
+  const nodes = (graph.nodes || []).map((node) => ({ ...node }))
+  const position = new Map()
+  const n = Math.max(1, nodes.length)
+  nodes.forEach((node, index) => {
+    const spread = node.kind === 'memory' ? 140 : 90
+    const radius = spread * (0.35 + random() * 0.9)
+    const theta = random() * Math.PI * 2
+    const phi = Math.acos(2 * random() - 1)
+    position.set(node.id, {
+      x: Math.sin(phi) * Math.cos(theta) * radius,
+      y: Math.sin(phi) * Math.sin(theta) * radius * 0.85,
+      z: Math.cos(phi) * radius,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      sx: 0,
+      sy: 0,
+      scale: 1,
+      radius: 3,
+    })
+  })
+  const links = (graph.links || []).filter((link) => position.has(link.source) && position.has(link.target))
+  return { nodes, links, position, count: n }
+}
+
+function stepLayout(layout, alpha) {
+  const nodes = layout.nodes
+  const pos = layout.position
+  const count = nodes.length
+  if (count === 0) return
+
+  for (let i = 0; i < count; i++) {
+    const node = nodes[i]
+    const point = pos.get(node.id)
+    const gravity = node.kind === 'memory' ? 0.012 : 0.035
+    point.vx -= point.x * gravity
+    point.vy -= point.y * gravity
+    point.vz -= point.z * gravity
+  }
+
+  const repulsion = 900
+  for (let i = 0; i < count; i++) {
+    const a = pos.get(nodes[i].id)
+    for (let j = i + 1; j < count; j++) {
+      const b = pos.get(nodes[j].id)
+      let dx = a.x - b.x
+      let dy = a.y - b.y
+      let dz = a.z - b.z
+      let d2 = dx * dx + dy * dy + dz * dz
+      if (d2 < 1) {
+        d2 = 1
+        dx = 1
+        dy = 0.6
+        dz = 0.2
+      }
+      const d = Math.sqrt(d2)
+      const force = (repulsion * alpha) / d2
+      const fx = (dx / d) * force
+      const fy = (dy / d) * force
+      const fz = (dz / d) * force
+      a.vx += fx
+      a.vy += fy
+      a.vz += fz
+      b.vx -= fx
+      b.vy -= fy
+      b.vz -= fz
+    }
+  }
+
+  for (const link of layout.links) {
+    const a = pos.get(link.source)
+    const b = pos.get(link.target)
+    const dx = b.x - a.x
+    const dy = b.y - a.y
+    const dz = b.z - a.z
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1
+    const rest = link.kind === 'topic' ? 165 : link.kind === 'entity' ? 100 : 70
+    const strength = 0.035 * alpha
+    const force = (d - rest) * strength
+    const ux = dx / d
+    const uy = dy / d
+    const uz = dz / d
+    a.vx += ux * force
+    a.vy += uy * force
+    a.vz += uz * force
+    b.vx -= ux * force
+    b.vy -= uy * force
+    b.vz -= uz * force
+  }
+
+  const limit = 560
+  for (let i = 0; i < count; i++) {
+    const point = pos.get(nodes[i].id)
+    point.vx *= 0.82
+    point.vy *= 0.82
+    point.vz *= 0.82
+    point.x += point.vx
+    point.y += point.vy
+    point.z += point.vz
+    if (point.x > limit) point.x = limit
+    else if (point.x < -limit) point.x = -limit
+    if (point.y > limit) point.y = limit
+    else if (point.y < -limit) point.y = -limit
+    if (point.z > limit) point.z = limit
+    else if (point.z < -limit) point.z = -limit
+  }
+}
+
+function projectLayout(layout, view, width, height) {
+  const cx = width / 2 + view.panX
+  const cy = height / 2 + view.panY
+  const distance = 900
+  const focal = 720 * view.zoom
+  const cosYaw = Math.cos(view.yaw)
+  const sinYaw = Math.sin(view.yaw)
+  const cosPitch = Math.cos(view.pitch)
+  const sinPitch = Math.sin(view.pitch)
+  for (const node of layout.nodes) {
+    const point = layout.position.get(node.id)
+    const x1 = point.x * cosYaw + point.z * sinYaw
+    const z1 = -point.x * sinYaw + point.z * cosYaw
+    const y1 = point.y * cosPitch - z1 * sinPitch
+    const z2 = point.y * sinPitch + z1 * cosPitch
+    const denom = z2 + distance
+    const scale = denom > 60 ? focal / denom : 0
+    point.sx = cx + x1 * scale
+    point.sy = cy + y1 * scale
+    point.scale = scale
+    point.depth = z2
+    point.radius = nodeRadius(node, scale)
+  }
+}
+
+function drawScene(ctx, width, height, layout, view, selectedId, hoverId, hasQuery) {
+  projectLayout(layout, view, width, height)
+  ctx.clearRect(0, 0, width, height)
+
+  const linkColor = (kind) => {
+    if (kind === 'conflict') return '248,113,113'
+    if (kind === 'supersede') return '251,191,36'
+    if (kind === 'topic') return '192,132,252'
+    return '148,163,184'
+  }
+
+  for (const link of layout.links) {
+    const a = layout.position.get(link.source)
+    const b = layout.position.get(link.target)
+    if (!a || !b) continue
+    const depth = Math.max(0, Math.min(1, (a.depth + b.depth + 1100) / 2200))
+    const alpha = link.kind === 'conflict' || link.kind === 'supersede' ? 0.75 : 0.16 + depth * 0.22
+    ctx.strokeStyle = `rgba(${linkColor(link.kind)},${alpha.toFixed(3)})`
+    ctx.lineWidth = link.kind === 'conflict' || link.kind === 'supersede' ? 1.4 : 0.7
+    if (link.kind === 'conflict') ctx.setLineDash([4, 4])
+    else ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.moveTo(a.sx, a.sy)
+    ctx.lineTo(b.sx, b.sy)
+    ctx.stroke()
+  }
+  ctx.setLineDash([])
+
+  const ordered = [...layout.nodes].sort((left, right) => layout.position.get(right.id).depth - layout.position.get(left.id).depth)
+  for (const node of ordered) {
+    const point = layout.position.get(node.id)
+    if (point.scale <= 0) continue
+    const radius = point.radius
+    const isSelected = node.id === selectedId
+    const isHover = node.id === hoverId
+    const dimmed = hasQuery && !node.matched && !isSelected && !isHover
+    const color =
+      node.kind === 'entity'
+        ? '45,212,191'
+        : node.kind === 'topic'
+          ? '192,132,252'
+          : node.status === 'SUPERSEDED'
+            ? '251,191,36'
+            : node.status === 'TOMBSTONED'
+              ? '148,163,184'
+              : '96,165,250'
+    const alpha = dimmed ? 0.18 : 0.55 + Math.max(0, Math.min(1, (point.depth + 600) / 1200)) * 0.45
+
+    if (isSelected || isHover) {
+      ctx.beginPath()
+      ctx.arc(point.sx, point.sy, radius + 5, 0, Math.PI * 2)
+      ctx.strokeStyle = `rgba(${color},0.75)`
+      ctx.lineWidth = 1.2
+      ctx.stroke()
+    }
+    if (node.matched && hasQuery) {
+      ctx.beginPath()
+      ctx.arc(point.sx, point.sy, radius + 3.5, 0, Math.PI * 2)
+      ctx.strokeStyle = 'rgba(250,204,21,0.85)'
+      ctx.lineWidth = 1.2
+      ctx.stroke()
+    }
+
+    const gradient = ctx.createRadialGradient(point.sx - radius * 0.3, point.sy - radius * 0.3, 0, point.sx, point.sy, Math.max(1, radius))
+    gradient.addColorStop(0, `rgba(255,255,255,${Math.min(0.95, alpha + 0.25).toFixed(3)})`)
+    gradient.addColorStop(0.45, `rgba(${color},${alpha.toFixed(3)})`)
+    gradient.addColorStop(1, `rgba(${color},0.04)`)
+    ctx.beginPath()
+    ctx.arc(point.sx, point.sy, radius, 0, Math.PI * 2)
+    ctx.fillStyle = gradient
+    ctx.fill()
+  }
+
+  ctx.textBaseline = 'middle'
+  ctx.font = '10px ui-sans-serif, system-ui, "Segoe UI", sans-serif'
+  for (const node of ordered) {
+    const point = layout.position.get(node.id)
+    if (point.scale <= 0) continue
+    const showLabel =
+      node.id === selectedId ||
+      node.id === hoverId ||
+      node.kind === 'entity' ||
+      node.kind === 'topic' ||
+      (node.matched && hasQuery) ||
+      point.scale > 1.15
+    if (!showLabel) continue
+    const label = node.kind === 'memory' ? String(node.label || '').slice(0, 26) : `${node.kind === 'entity' ? '· ' : '# '}${node.label}`
+    const x = point.sx + point.radius + 5
+    const y = point.sy
+    ctx.fillStyle = 'rgba(226,232,240,0.82)'
+    ctx.fillText(label, x, y)
+  }
+}
+
+function MemorySpace(props) {
+  const query = props?.query || ''
+  const topicId = props?.topicId || ''
+  const includeDeleted = Boolean(props?.includeDeleted)
+  const wrapRef = React.useRef(null)
+  const canvasRef = React.useRef(null)
+  const layoutRef = React.useRef({ nodes: [], links: [], position: new Map(), count: 0 })
+  const viewRef = React.useRef({ ...SPACE_DEFAULTS })
+  const alphaRef = React.useRef(1)
+  const rafRef = React.useRef(0)
+  const dragRef = React.useRef(null)
+  const selectedRef = React.useRef(null)
+  const hoverRef = React.useRef(null)
+  const queryRef = React.useRef(false)
+
+  const [graph, setGraph] = React.useState(null)
+  const [stats, setStats] = React.useState(null)
+  const [truncated, setTruncated] = React.useState(false)
+  const [selectedId, setSelectedId] = React.useState(null)
+  const [hoverId, setHoverId] = React.useState(null)
+  const [hoverNode, setHoverNode] = React.useState(null)
+  const [loading, setLoading] = React.useState(false)
+  const [error, setError] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+
+  React.useEffect(() => {
+    selectedRef.current = selectedId
+  }, [selectedId])
+  React.useEffect(() => {
+    hoverRef.current = hoverId
+  }, [hoverId])
+  React.useEffect(() => {
+    queryRef.current = Boolean(query)
+  }, [query])
+
+  React.useEffect(() => {
+    let cancelled = false
+    let timer = 0
+    const run = async () => {
+      setLoading(true)
+      setError('')
+      try {
+        const payload = await api(
+          `/graph?limit=400&query=${encodeURIComponent(query)}&topicId=${encodeURIComponent(topicId)}&includeDeleted=${includeDeleted ? '1' : '0'}`,
+        )
+        if (cancelled) return
+        setGraph(payload)
+        setStats(payload.stats || null)
+        setTruncated(Boolean(payload.truncated))
+      } catch (err) {
+        if (!cancelled) setError(String(err && err.message ? err.message : err))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+    timer = setTimeout(run, query ? 220 : 0)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [query, topicId, includeDeleted])
+
+  React.useEffect(() => {
+    if (!graph) return
+    layoutRef.current = buildLayout(graph)
+    alphaRef.current = 1
+    selectedRef.current = null
+    setSelectedId(null)
+    setHoverId(null)
+    setHoverNode(null)
+  }, [graph])
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current
+    const wrap = wrapRef.current
+    if (!canvas || !wrap) return
+    const ctx = canvas.getContext('2d')
+    let width = 0
+    let height = 0
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+
+    const resize = () => {
+      const rect = wrap.getBoundingClientRect()
+      width = Math.max(1, Math.floor(rect.width))
+      height = Math.max(1, Math.floor(rect.height))
+      canvas.width = Math.floor(width * dpr)
+      canvas.height = Math.floor(height * dpr)
+      canvas.style.width = `${width}px`
+      canvas.style.height = `${height}px`
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    }
+    resize()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null
+    observer?.observe(wrap)
+
+    const frame = () => {
+      const layout = layoutRef.current
+      if (alphaRef.current > 0.004) {
+        stepLayout(layout, alphaRef.current)
+        alphaRef.current *= 0.993
+      }
+      drawScene(ctx, width, height, layout, viewRef.current, selectedRef.current, hoverRef.current, queryRef.current)
+      rafRef.current = requestAnimationFrame(frame)
+    }
+    rafRef.current = requestAnimationFrame(frame)
+
+    return () => {
+      cancelAnimationFrame(rafRef.current)
+      observer?.disconnect()
+    }
+  }, [])
+
+  const hitTest = React.useCallback((clientX, clientY) => {
+    const canvas = canvasRef.current
+    if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    const x = clientX - rect.left
+    const y = clientY - rect.top
+    let best = null
+    let bestDistance = Infinity
+    for (const node of layoutRef.current.nodes) {
+      const point = layoutRef.current.position.get(node.id)
+      if (!point || point.scale <= 0) continue
+      const distance = Math.hypot(point.sx - x, point.sy - y)
+      const hitRadius = Math.max(8, point.radius + 6)
+      if (distance <= hitRadius && distance < bestDistance) {
+        best = node
+        bestDistance = distance
+      }
+    }
+    return best
+  }, [])
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const onPointerDown = (event) => {
+      if (event.button !== 0) return
+      dragRef.current = { x: event.clientX, y: event.clientY, yaw: viewRef.current.yaw, pitch: viewRef.current.pitch, moved: false }
+      canvas.setPointerCapture?.(event.pointerId)
+    }
+    const onPointerMove = (event) => {
+      const drag = dragRef.current
+      if (drag && (event.buttons & 1)) {
+        const dx = event.clientX - drag.x
+        const dy = event.clientY - drag.y
+        if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true
+        viewRef.current.yaw = drag.yaw + dx * 0.006
+        viewRef.current.pitch = Math.max(-1.3, Math.min(1.3, drag.pitch - dy * 0.006))
+        return
+      }
+      const node = hitTest(event.clientX, event.clientY)
+      const nextId = node ? node.id : null
+      if (nextId !== hoverRef.current) {
+        hoverRef.current = nextId
+        setHoverId(nextId)
+        setHoverNode(node)
+      }
+    }
+    const onPointerUp = (event) => {
+      const drag = dragRef.current
+      dragRef.current = null
+      canvas.releasePointerCapture?.(event.pointerId)
+      if (drag && drag.moved) return
+      const node = hitTest(event.clientX, event.clientY)
+      setSelectedId(node ? node.id : null)
+    }
+    const onPointerLeave = () => {
+      hoverRef.current = null
+      setHoverId(null)
+      setHoverNode(null)
+      dragRef.current = null
+    }
+    const onWheel = (event) => {
+      event.preventDefault()
+      const next = viewRef.current.zoom * Math.exp(-event.deltaY * 0.0012)
+      viewRef.current.zoom = Math.max(0.35, Math.min(3.2, next))
+    }
+    canvas.addEventListener('pointerdown', onPointerDown)
+    canvas.addEventListener('pointermove', onPointerMove)
+    canvas.addEventListener('pointerup', onPointerUp)
+    canvas.addEventListener('pointerleave', onPointerLeave)
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      canvas.removeEventListener('pointerdown', onPointerDown)
+      canvas.removeEventListener('pointermove', onPointerMove)
+      canvas.removeEventListener('pointerup', onPointerUp)
+      canvas.removeEventListener('pointerleave', onPointerLeave)
+      canvas.removeEventListener('wheel', onWheel)
+    }
+  }, [hitTest])
+
+  const selectedNode = graph && selectedId ? graph.nodes.find((node) => node.id === selectedId) : null
+
+  const removeMemory = async (kind) => {
+    if (!selectedNode || selectedNode.kind !== 'memory') return
+    const memoryId = String(selectedNode.id).replace(/^m:/, '')
+    setBusy(true)
+    try {
+      await api(`/${kind}`, { method: 'POST', body: JSON.stringify({ memoryId }) })
+      const payload = await api(
+        `/graph?limit=400&query=${encodeURIComponent(query)}&topicId=${encodeURIComponent(topicId)}&includeDeleted=${includeDeleted ? '1' : '0'}`,
+      )
+      setGraph(payload)
+      setStats(payload.stats || null)
+      setTruncated(Boolean(payload.truncated))
+    } catch (err) {
+      setError(String(err && err.message ? err.message : err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return h(
+    'div',
+    { style: { position: 'relative', flex: 1, minHeight: 320, borderRadius: 10, overflow: 'hidden', background: 'radial-gradient(ellipse at 50% 42%, rgba(80,130,255,0.10), transparent 62%)' } },
+    h('canvas', {
+      ref: canvasRef,
+      style: { display: 'block', width: '100%', height: '100%', cursor: hoverId ? 'pointer' : 'grab', touchAction: 'none' },
+    }),
     h(
       'div',
-      { style: styles.list },
-      memories.length === 0 && !loading
-        ? h('div', { style: styles.empty }, query || topicId ? '没有匹配的记忆' : '还没有记忆。对话几轮后会自动提取。')
-        : memories.map((memory) => h(MemoryCard, { key: memory.memoryId, memory, busy, onForget, onPurge })),
+      { style: { position: 'absolute', left: 10, top: 8, right: 10, display: 'flex', justifyContent: 'space-between', pointerEvents: 'none', fontSize: 11, opacity: 0.7 } },
+      h('span', null, stats ? `${stats.memories} 条记忆 · ${stats.entities} 个实体 · ${stats.topics} 个主题` : loading ? '加载中…' : ''),
+      h('span', null, truncated ? '数据已截断（最多 400 条）' : '拖拽旋转 · 滚轮缩放 · 点击节点查看'),
     ),
-    h(
-      'div',
-      { style: styles.footer },
-      h('span', null, `共 ${memories.length} 条${stats ? ` / 库内 ${stats.total} 条` : ''}`),
-      stats && stats.lastUpdated ? h('span', null, `最新写入 ${formatTime(stats.lastUpdated)}`) : null,
-    ),
+    error ? h('div', { style: { ...styles.error, position: 'absolute', left: 10, right: 10, bottom: 10 } }, error) : null,
+    selectedNode && selectedNode.kind === 'memory'
+      ? h(
+          'div',
+          {
+            style: {
+              position: 'absolute',
+              right: 10,
+              bottom: 10,
+              width: 'min(320px, 78%)',
+              maxHeight: '62%',
+              overflowY: 'auto',
+              padding: '10px 12px',
+              borderRadius: 10,
+              border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,.28))',
+              background: 'var(--dsw-alias-bg-elevated, rgba(20,24,32,0.92))',
+              backdropFilter: 'blur(8px)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+            },
+          },
+          h(
+            'div',
+            { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+            h('span', { style: { fontSize: 12, opacity: 0.7 } }, `${selectedNode.topicId} · ${selectedNode.status}`),
+            h('button', { style: { ...styles.button, padding: '2px 8px' }, onClick: () => setSelectedId(null) }, '关闭'),
+          ),
+          h('div', { style: { fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, selectedNode.content),
+          h(
+            'div',
+            { style: { display: 'flex', gap: 6, flexWrap: 'wrap', fontSize: 11, opacity: 0.65 } },
+            h('span', null, `${selectedNode.entity} · ${selectedNode.attribute}`),
+            h('span', null, formatTime(selectedNode.updatedAt)),
+          ),
+          h(
+            'div',
+            { style: { display: 'flex', gap: 6, justifyContent: 'flex-end' } },
+            selectedNode.status === 'TOMBSTONED'
+              ? h('button', { style: { ...styles.button, ...styles.buttonDanger }, disabled: busy, onClick: () => removeMemory('purge') }, '彻底删除')
+              : h('button', { style: styles.button, disabled: busy, onClick: () => removeMemory('forget') }, '删除'),
+          ),
+        )
+      : null,
+    hoverNode && (!selectedNode || hoverNode.id !== selectedNode.id)
+      ? h(
+          'div',
+          {
+            style: {
+              position: 'absolute',
+              left: 12,
+              bottom: 12,
+              maxWidth: '72%',
+              padding: '6px 9px',
+              borderRadius: 8,
+              fontSize: 11,
+              background: 'rgba(15,18,24,0.72)',
+              color: 'rgba(226,232,240,0.9)',
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            },
+          },
+          hoverNode.kind === 'memory' ? String(hoverNode.content || '').slice(0, 90) : `${hoverNode.kind === 'entity' ? '实体' : '主题'}：${hoverNode.label}`,
+        )
+      : null,
   )
 }
 
@@ -437,4 +1009,7 @@ function apply(ctx) {
   }
 }
 
-export { name, inject, apply }
+/** 仅用于构建/沙箱自测的纯函数（Loader 不使用）。 */
+const __debug = { buildLayout, stepLayout, projectLayout, drawScene }
+
+export { name, inject, apply, __debug }

@@ -160,6 +160,94 @@ export function registerMemoryApi(ctx: any, plugin: PluginLike, log: (event: str
 
   webServer.register({
     kind: 'exact',
+    path: '/plugins/dsh-memory/graph',
+    handler: (req, res) => {
+      if (!isLoopback(req)) return json(res, 403, { error: 'loopback only' })
+      try {
+        const url = urlOf(req)
+        const includeDeleted = url.searchParams.get('includeDeleted') === '1'
+        const topicFilter = (url.searchParams.get('topicId') ?? '').trim()
+        const query = (url.searchParams.get('query') ?? '').trim().toLowerCase()
+        const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 400) || 400, 20), 800)
+
+        let memories = (storage.listMemories(tenantId) as any[]).filter((memory) => {
+          if (topicFilter && memory.topicId !== topicFilter) return false
+          if (!includeDeleted && (memory.deletedAt || memory.status === 'TOMBSTONED')) return false
+          return true
+        })
+        memories.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+        const truncated = memories.length > limit
+        if (truncated) memories = memories.slice(0, limit)
+        const known = new Set(memories.map((memory) => memory.id))
+
+        const nodes: any[] = []
+        const links: any[] = []
+        const entityDegree = new Map<string, number>()
+        const topicDegree = new Map<string, number>()
+
+        for (const memory of memories) {
+          const haystack = [memory.content, memory.entity, memory.attribute, memory.value, memory.topicId]
+            .map((part) => String(part ?? '').toLowerCase())
+          nodes.push({
+            id: `m:${memory.id}`,
+            kind: 'memory',
+            label: memory.content,
+            content: memory.content,
+            topicId: memory.topicId,
+            entity: memory.entity,
+            attribute: memory.attribute,
+            status: memory.status,
+            importance: memory.importance,
+            updatedAt: memory.updatedAt,
+            modality: memory.modality,
+            matched: query !== '' && haystack.some((part) => part.includes(query)),
+          })
+          if (memory.entity) entityDegree.set(memory.entity, (entityDegree.get(memory.entity) ?? 0) + 1)
+          topicDegree.set(memory.topicId, (topicDegree.get(memory.topicId) ?? 0) + 1)
+          if (memory.supersededBy && known.has(memory.supersededBy)) {
+            links.push({ source: `m:${memory.id}`, target: `m:${memory.supersededBy}`, kind: 'supersede' })
+          }
+        }
+
+        for (const [entity, degree] of entityDegree) {
+          nodes.push({ id: `e:${entity}`, kind: 'entity', label: entity, degree })
+        }
+        for (const [topicId, degree] of topicDegree) {
+          nodes.push({ id: `t:${topicId}`, kind: 'topic', label: topicId, degree })
+        }
+        for (const memory of memories) {
+          if (memory.entity) links.push({ source: `m:${memory.id}`, target: `e:${memory.entity}`, kind: 'entity' })
+          links.push({ source: `m:${memory.id}`, target: `t:${memory.topicId}`, kind: 'topic' })
+        }
+
+        try {
+          const groups = ((storage.listConflicts?.(tenantId) ?? []) as any[])
+          for (const group of groups) {
+            const ids = (group.memberMemoryIds ?? []).filter((id: string) => known.has(id))
+            for (let i = 0; i < ids.length; i++) {
+              for (let j = i + 1; j < ids.length; j++) {
+                links.push({ source: `m:${ids[i]}`, target: `m:${ids[j]}`, kind: 'conflict' })
+              }
+            }
+          }
+        } catch {
+          // 冲突表不可用时忽略
+        }
+
+        json(res, 200, {
+          nodes,
+          links,
+          truncated,
+          stats: { memories: memories.length, entities: entityDegree.size, topics: topicDegree.size },
+        })
+      } catch (error) {
+        json(res, 500, { error: String(error) })
+      }
+    },
+  })
+
+  webServer.register({
+    kind: 'exact',
     path: '/plugins/dsh-memory/forget',
     handler: async (req, res) => {
       if (!isLoopback(req)) return json(res, 403, { error: 'loopback only' })

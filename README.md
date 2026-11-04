@@ -114,12 +114,23 @@ plugin-build/pkg/
 
 页面能力：统计、关键词检索（FTS）+ 主题筛选 +「仅活跃 / 含已删除」、墓碑删除 / 彻底删除、NDJSON 导出。
 
+### 空间视图（3D）
+
+默认进入「空间」模式（右上角可切回「列表」），把记忆画成一个可旋转的三维网络：
+
+- **节点**：记忆点（大小=importance，颜色=状态/主题）、实体枢纽（青色）、主题星团（紫色）；
+- **连边**：同实体 / 同主题 / 冲突（红色虚线）/ 取代链（黄色）；
+- **交互**：空白拖拽旋转（yaw/pitch）、滚轮缩放、悬停高亮并显示摘要、点击节点弹出详情卡（可删除/彻底删除）、搜索命中节点描金边并压暗其余、主题 chips 过滤；
+- **实现**：Canvas 2D + 透视投影的伪 3D，自己写的 3D 力导向（斥力 + 弹簧 + 向心），无 three.js 等新依赖；布局用确定性随机种子，同一份数据每次打开形状一致；
+- **规模**：默认最多 400 条记忆节点，超出截断并提示；数据更多时应改为主题/实体聚合 + 钻取。
+
 数据来自宿主插件注册的 `/plugins/dsh-memory/*` 路由（仅 loopback）：
 
 | 路由 | 说明 |
 |---|---|
 | `GET /plugins/dsh-memory/stats` | 统计与主题分布 |
 | `GET /plugins/dsh-memory/list?query=&topicId=&includeDeleted=&limit=` | 列表 / 检索 |
+| `GET /plugins/dsh-memory/graph?query=&topicId=&includeDeleted=&limit=` | 空间视图的节点 + 连边（含 `matched` 标记） |
 | `POST /plugins/dsh-memory/forget` `{memoryId}` | 墓碑删除 |
 | `POST /plugins/dsh-memory/purge` `{memoryId}` | 硬删（需先 forget） |
 | `GET /plugins/dsh-memory/export` | NDJSON 导出 |
