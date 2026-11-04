@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createStorage } from '@dsh-memory/storage-sqlite'
 import { ingestCandidate } from '@dsh-memory/core'
-import { registerMemoryApi } from '../plugin-build/http.ts'
+import { registerMemoryApi } from '../plugin-build/http.js'
 
 const clock = { now: () => new Date('2026-11-04T00:00:00.000Z') }
 
@@ -18,7 +18,7 @@ function makeRes(): { res: any; captured: Captured } {
       captured.statusCode = value
     },
     get statusCode() {
-      return captured.statusCode
+      return captured.statusCode ?? 0
     },
     setHeader(name: string, value: string) {
       captured.headers[name.toLowerCase()] = value
