@@ -839,6 +839,7 @@ function MemorySpace(props) {
   return h(
     'div',
     {
+      ref: wrapRef,
       style: {
         position: 'relative',
         width: '100%',
