@@ -138,7 +138,8 @@ function MemoryCard(props) {
   )
 }
 
-function MemorySection() {
+function MemorySection(props) {
+  const pane = props?.variant === 'pane'
   const [stats, setStats] = React.useState(null)
   const [memories, setMemories] = React.useState([])
   const [query, setQuery] = React.useState('')
@@ -215,7 +216,7 @@ function MemorySection() {
 
   return h(
     'div',
-    { style: styles.page },
+    { style: pane ? { ...styles.page, padding: '8px 10px' } : styles.page },
     h(
       'div',
       { style: styles.header },
@@ -305,12 +306,48 @@ function MemorySection() {
   )
 }
 
+/** 右侧栏 tab 类型的实现标识（同时用作 body/title 插槽的 key）。 */
+const PANE_ID = 'dsh-memory-plugin.memory'
+/** 右侧栏 tab 的 kind（openTab 用它打开）。 */
+const PANE_KIND = 'memory'
+
+/** 记忆图标（右侧栏 guide 卡片与 tab 标题共用）。 */
+function MemoryIcon(props) {
+  return h(
+    'svg',
+    {
+      width: props?.size ?? 16,
+      height: props?.size ?? 16,
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 1.6,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      'aria-hidden': true,
+    },
+    h('path', { d: 'M12 3a6 6 0 0 0-6 6v3.5L4.5 15a1 1 0 0 0 .9 1.5h2.1a4.5 4.5 0 0 0 9 0h2.1a1 1 0 0 0 .9-1.5L18 12.5V9a6 6 0 0 0-6-6Z' }),
+    h('path', { d: 'M9.5 18.5h5' }),
+  )
+}
+
+/** 右侧栏 tab 的标题（图标 + 文案）。 */
+function MemoryPaneTitle() {
+  return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } }, h(MemoryIcon, { size: 14 }), '记忆')
+}
+
+/** 右侧栏 tab 主体：直接复用记忆管理页，只是去掉设置页的外层间距。 */
+function MemoryPaneBody(props) {
+  return h(MemorySection, { ...props, variant: 'pane' })
+}
+
 /** 插件显示名（Loader 会忽略，仅供调试）。 */
 const name = 'dsh-memory-plugin'
 /** 需要的浏览器服务。 */
-const inject = ['slots']
+const inject = ['slots', 'sidebarRightTabs']
 
 function apply(ctx) {
+  // 1) 设置 → 记忆（与壁纸插件同一套入口）
   ctx.effect(() =>
     ctx.slots.inject('settings.section', () =>
       ctx.slots.register(
@@ -321,6 +358,51 @@ function apply(ctx) {
           label: () => '记忆',
         },
         MemorySection,
+      ),
+    ),
+  )
+
+  // 2) 右侧栏 tab（文件 / 浏览器 / 终端那一列）
+  ctx.effect(() =>
+    ctx.sidebarRightTabs.register({
+      id: PANE_ID,
+      kind: PANE_KIND,
+      priority: 'extension',
+      multiple: false,
+      keepMounted: true,
+      title: () => '记忆',
+      guide: [
+        {
+          id: 'memory',
+          order: 45,
+          title: () => '记忆',
+          description: () => '查看长期记忆',
+          icon: MemoryIcon,
+        },
+      ],
+    }),
+  )
+
+  ctx.effect(() =>
+    ctx.slots.inject('sidebar.right.pane.tab', () =>
+      ctx.slots.register(
+        {
+          name: 'sidebar.right.pane.tab',
+          key: PANE_ID,
+        },
+        MemoryPaneBody,
+      ),
+    ),
+  )
+
+  ctx.effect(() =>
+    ctx.slots.inject('sidebar.right.pane.tab.title', () =>
+      ctx.slots.register(
+        {
+          name: 'sidebar.right.pane.tab.title',
+          key: PANE_ID,
+        },
+        MemoryPaneTitle,
       ),
     ),
   )
