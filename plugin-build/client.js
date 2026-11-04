@@ -578,26 +578,7 @@ function drawScene(ctx, width, height, layout, view, selectedId, hoverId, hasQue
     ctx.fillStyle = gradient
     ctx.fill()
   }
-
-  ctx.textBaseline = 'middle'
-  ctx.font = '10px ui-sans-serif, system-ui, "Segoe UI", sans-serif'
-  for (const node of ordered) {
-    const point = layout.position.get(node.id)
-    if (point.scale <= 0) continue
-    const showLabel =
-      node.id === selectedId ||
-      node.id === hoverId ||
-      node.kind === 'entity' ||
-      node.kind === 'topic' ||
-      (node.matched && hasQuery) ||
-      point.scale > 1.15
-    if (!showLabel) continue
-    const label = node.kind === 'memory' ? String(node.label || '').slice(0, 26) : `${node.kind === 'entity' ? '· ' : '# '}${node.label}`
-    const x = point.sx + point.radius + 5
-    const y = point.sy
-    ctx.fillStyle = 'rgba(226,232,240,0.82)'
-    ctx.fillText(label, x, y)
-  }
+  // 节点旁不画任何文字：内容只在点击后的详情卡里展示。
 }
 
 function MemorySpace(props) {
@@ -755,7 +736,8 @@ function MemorySpace(props) {
 
   React.useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas) return
+    const wrap = wrapRef.current
+    if (!canvas || !wrap) return
     const onPointerDown = (event) => {
       if (event.button !== 0) return
       dragRef.current = { x: event.clientX, y: event.clientY, yaw: viewRef.current.yaw, pitch: viewRef.current.pitch, moved: false }
@@ -794,21 +776,25 @@ function MemorySpace(props) {
       dragRef.current = null
     }
     const onWheel = (event) => {
+      // 阻止外层滚动容器吃掉滚轮：canvas 上的监听会被容器先滚动，
+      // 所以这里挂在 wrap 上并用捕获阶段 + 非 passive。
       event.preventDefault()
-      const next = viewRef.current.zoom * Math.exp(-event.deltaY * 0.0012)
-      viewRef.current.zoom = Math.max(0.35, Math.min(3.2, next))
+      event.stopPropagation()
+      const factor = Math.exp(-event.deltaY * 0.0022)
+      const next = viewRef.current.zoom * factor
+      viewRef.current.zoom = Math.max(0.2, Math.min(6, next))
     }
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
     canvas.addEventListener('pointerleave', onPointerLeave)
-    canvas.addEventListener('wheel', onWheel, { passive: false })
+    wrap.addEventListener('wheel', onWheel, { passive: false, capture: true })
     return () => {
       canvas.removeEventListener('pointerdown', onPointerDown)
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
       canvas.removeEventListener('pointerleave', onPointerLeave)
-      canvas.removeEventListener('wheel', onWheel)
+      wrap.removeEventListener('wheel', onWheel, { capture: true })
     }
   }, [hitTest])
 
@@ -955,29 +941,46 @@ function MemorySpace(props) {
           ),
         )
       : null,
-    hoverNode && (!selectedNode || hoverNode.id !== selectedNode.id)
-      ? h(
-          'div',
-          {
-            style: {
-              position: 'absolute',
-              left: 12,
-              bottom: 12,
-              maxWidth: '72%',
-              padding: '6px 9px',
-              borderRadius: 8,
-              fontSize: 11,
-              background: 'rgba(15,18,24,0.72)',
-              color: 'rgba(226,232,240,0.9)',
-              pointerEvents: 'none',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-            },
+    // 缩放按钮：滚轮可能被外层容器拦截，这里提供确定可用的入口
+    h(
+      'div',
+      { style: { position: 'absolute', left: 10, bottom: 10, display: 'flex', flexDirection: 'column', gap: 4 } },
+      h(
+        'button',
+        {
+          style: { ...styles.button, padding: '1px 7px', fontSize: 14, lineHeight: 1.4 },
+          title: '放大',
+          onClick: () => {
+            viewRef.current.zoom = Math.min(6, viewRef.current.zoom * 1.35)
           },
-          hoverNode.kind === 'memory' ? String(hoverNode.content || '').slice(0, 90) : `${hoverNode.kind === 'entity' ? '实体' : '主题'}：${hoverNode.label}`,
-        )
-      : null,
+        },
+        '＋',
+      ),
+      h(
+        'button',
+        {
+          style: { ...styles.button, padding: '1px 7px', fontSize: 14, lineHeight: 1.4 },
+          title: '缩小',
+          onClick: () => {
+            viewRef.current.zoom = Math.max(0.2, viewRef.current.zoom / 1.35)
+          },
+        },
+        '－',
+      ),
+      h(
+        'button',
+        {
+          style: { ...styles.button, padding: '1px 7px', fontSize: 11, lineHeight: 1.4 },
+          title: '重置视角',
+          onClick: () => {
+            const restored = { ...SPACE_DEFAULTS }
+            restored.zoom = 1
+            viewRef.current = restored
+          },
+        },
+        '⟳',
+      ),
+    ),
   )
 }
 
