@@ -126,6 +126,21 @@ plugin-build/pkg/
 
 构建产物：`pkg/lib/index.js`（宿主）+ `pkg/lib/client.js`（浏览器，包装成 DSH 的 `__ModuleLoader__` 工厂，`react` 走 externals）。
 
+> **前端 bundle 的硬性要求**：DSH 的 factory 作用域里没有 Node 的 `module`/`exports`，包装时必须先写
+> `var module = { exports: {} }; var exports = module.exports;`，否则客户端会报
+> `dsh-memory-plugin: import failed: module is not defined`，web boot 失败并弹出致命错误框。
+> `build.mjs` 已加断言防回归，沙箱测试见 `plugin-build/` 构建脚本。
+
+## 故障恢复（重要）
+
+DSH 遇到首个致命启动错误时会弹出对话框，按钮是「退出 / 重启 / **禁用第三方插件**」。
+点「禁用第三方插件」会执行 `sanitizeProfile`：把 `cordis.patch.yml` 备份成
+`cordis.patch.yml.bak-<timestamp>`、把 `package.json` 的 bundles 重置为 `dsh-base + dsh-web-app`。
+
+- 崩溃报告：`%APPDATA%\@deepseek-ai\dsh-desktop\logs\crash-<ISO>-<source>.log`（`source` 如 `web-boot`）；
+- 恢复配置：用备份的 `cordis.patch.yml.bak-*` + 原 `package.json` 覆盖回去即可（本仓库恢复过两次）；
+- 本插件历史崩溃原因：`dsh-memory-plugin: import failed: module is not defined`（客户端包装缺 module shim），已修复。
+
 ## 启用 / 关闭（本机）
 
 - 安装：profile 的 `node_modules/dsh-memory-plugin`（指向 `.local-plugins/`）+ `package.json` 的 `dsh.profile.bundles`；

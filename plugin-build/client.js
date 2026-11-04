@@ -343,28 +343,21 @@ function MemoryPaneBody(props) {
 
 /** 插件显示名（Loader 会忽略，仅供调试）。 */
 const name = 'dsh-memory-plugin'
-/** 需要的浏览器服务。 */
-const inject = ['slots', 'sidebarRightTabs']
+/** 只声明必需服务；sidebarRightTabs 用 ctx.inject 延迟获取，缺席时不拖垮插件。 */
+const inject = ['slots']
 
-function apply(ctx) {
-  // 1) 设置 → 记忆（与壁纸插件同一套入口）
-  ctx.effect(() =>
-    ctx.slots.inject('settings.section', () =>
-      ctx.slots.register(
-        {
-          name: 'settings.section',
-          id: 'memory',
-          order: 55,
-          label: () => '记忆',
-        },
-        MemorySection,
-      ),
-    ),
-  )
+function warn(event, error) {
+  try {
+    console.warn(`[dsh-memory] ${event}`, error)
+  } catch {
+    // ignore
+  }
+}
 
-  // 2) 右侧栏 tab（文件 / 浏览器 / 终端那一列）
-  ctx.effect(() =>
-    ctx.sidebarRightTabs.register({
+/** 右侧栏 tab：类型 + body + title 三件套。 */
+function registerMemoryPane(scope) {
+  scope.effect(() =>
+    scope.sidebarRightTabs.register({
       id: PANE_ID,
       kind: PANE_KIND,
       priority: 'extension',
@@ -383,9 +376,9 @@ function apply(ctx) {
     }),
   )
 
-  ctx.effect(() =>
-    ctx.slots.inject('sidebar.right.pane.tab', () =>
-      ctx.slots.register(
+  scope.effect(() =>
+    scope.slots.inject('sidebar.right.pane.tab', () =>
+      scope.slots.register(
         {
           name: 'sidebar.right.pane.tab',
           key: PANE_ID,
@@ -395,9 +388,9 @@ function apply(ctx) {
     ),
   )
 
-  ctx.effect(() =>
-    ctx.slots.inject('sidebar.right.pane.tab.title', () =>
-      ctx.slots.register(
+  scope.effect(() =>
+    scope.slots.inject('sidebar.right.pane.tab.title', () =>
+      scope.slots.register(
         {
           name: 'sidebar.right.pane.tab.title',
           key: PANE_ID,
@@ -406,6 +399,42 @@ function apply(ctx) {
       ),
     ),
   )
+}
+
+function apply(ctx) {
+  // 1) 设置 → 记忆（与壁纸插件同一套入口）
+  try {
+    ctx.effect(() =>
+      ctx.slots.inject('settings.section', () =>
+        ctx.slots.register(
+          {
+            name: 'settings.section',
+            id: 'memory',
+            order: 55,
+            label: () => '记忆',
+          },
+          MemorySection,
+        ),
+      ),
+    )
+  } catch (error) {
+    warn('settings section registration failed', error)
+  }
+
+  // 2) 右侧栏 tab（文件 / 浏览器 / 终端那一列）。服务缺席时安静跳过。
+  try {
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['sidebarRightTabs'], (scope) => {
+        try {
+          registerMemoryPane(scope)
+        } catch (error) {
+          warn('right-sidebar tab registration failed', error)
+        }
+      })
+    }
+  } catch (error) {
+    warn('right-sidebar service unavailable', error)
+  }
 }
 
 export { name, inject, apply }
