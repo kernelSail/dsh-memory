@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@dsh-memory/core": "workspace:*",
-    "@dsh-memory/ports": "workspace:*"
+    "@dsh-memory/ports": "workspace:*",
+    "@dsh-memory/storage-sqlite": "workspace:*"
   }
 }

@@ -26,6 +26,9 @@ importers:
       '@dsh-memory/ports':
         specifier: workspace:*
         version: link:../memory-ports
+      '@dsh-memory/storage-sqlite':
+        specifier: workspace:*
+        version: link:../memory-storage-sqlite
 
   packages/memory-core:
     dependencies:

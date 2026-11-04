@@ -1,137 +1,307 @@
 /**
- * DSH 适配器（cordis 插件骨架）。
+ * DSH 记忆插件（cordis 适配器）。
  *
- * 设计要点（§17）：
- * - 三钩子：before_model_call / after_turn / on_session_end
- * - 复用宿主：ctx.llm（LLMPort 实现）、ctx.systemPrompt（注入）、ctx.tools（memory_search）
- * - 失败 fail-open，不阻塞主对话
+ * 职责：只做宿主接线，不含记忆规则（去重 / 判定 / 摘要 / 裁决都在 memory-core）。
+ * - `ctx.llm.stream` → LLMPort（见 ./llm.ts）
+ * - `ctx.systemPrompt.section` → 记忆上下文注入
+ * - `ctx.tools.register` → memory_search 工具
+ * - `ctx.on('session/event')` → 捕获用户消息 / turn 结束触发提取与写入
  *
- * 真实接线（DSH 0.2.x）：
- *   ctx.systemPrompt.add({...})
- *   ctx.tools.register(defineTool(...))
- *   ctx.on('turn/end', ...)
- * 本节先给出类型与调用契约，接入时替换为宿主真实 API。
+ * fail-open：任何钩子失败都只打日志，不阻塞主对话。
  */
-import type { MemoryContext, StoragePort, ClockPort, LLMPort } from '@dsh-memory/ports'
-import { ingestCandidate, retrieve, renderMemoryContext, shouldSummarize } from '@dsh-memory/core'
+import type { ClockPort, LLMPort, MemoryContext, StoragePort } from '@dsh-memory/ports'
+import { createStorage } from '@dsh-memory/storage-sqlite'
+import {
+  extractCandidates,
+  ingestCandidate,
+  renderMemoryContext,
+  retrieve,
+  runSummary,
+} from '@dsh-memory/core'
+import { createDshLlmPort, type DshLlmStreamLike } from './llm.js'
 
 export interface MemoryPluginConfig {
   enabled: boolean
   tenantId: string
+  defaultTopicId: string
+  /** ':memory:' 或本地文件路径 */
+  dbPath: string
+  provider: string
+  model: string
+  system: string | null
   noveltyThreshold: number
   maxMemories: number
   tokenBudget: number
-  preTurnTimeoutMs: number
+  /** systemPrompt 段顺序（越小越靠前） */
+  sectionOrder: number
+  maxExtractPerTurn: number
 }
 
 export const defaultConfig: MemoryPluginConfig = {
   enabled: true,
   tenantId: 'default',
+  defaultTopicId: 'default',
+  dbPath: ':memory:',
+  provider: 'deepseek-official',
+  model: 'deepseek-flash',
+  system: null,
   noveltyThreshold: 3.0,
   maxMemories: 12,
   tokenBudget: 4000,
-  preTurnTimeoutMs: 150,
+  sectionOrder: 50,
+  maxExtractPerTurn: 8,
 }
 
-/** 宿主侧最小依赖（真实 DSH 的 ctx 子集） */
-export interface MemoryHost {
-  storage: StoragePort
-  clock: ClockPort
-  llm?: LLMPort
-  /** 注册 system prompt 片段（§17.4） */
-  addPromptSection?(name: string, render: () => string): void
-  /** 注册模型可调用的工具（§17.7） */
-  registerTool?(tool: MemoryTool): void
-  /** 订阅会话事件（§17.7） */
-  onSessionEvent?(event: 'turn/end' | 'session/end', handler: (payload: unknown) => void): void
-  log?(level: 'debug' | 'info' | 'warn', message: string): void
+/** DSH cordis ctx 的最小结构类型（只用到的字段） */
+export interface DshContextLike {
+  llm?: DshLlmStreamLike
+  systemPrompt?: {
+    section(entry: {
+      name: string
+      order: number
+      text: string | (() => string)
+      interpolate?: boolean
+    }): unknown
+  }
+  tools?: { register(tool: unknown): unknown }
+  on?: (event: string, handler: (payload: unknown) => void) => unknown
+  logger?: { warn(message: string): void; info?(message: string): void }
 }
 
-export interface MemoryTool {
-  name: string
-  description: string
-  parameters: Record<string, unknown>
-  execute(input: Record<string, unknown>): Promise<unknown>
+export interface TurnMessage {
+  role: string
+  content: string
 }
 
-export interface TurnPayload {
+export interface TurnRecord {
   sessionId: string
   turnId: string
-  messages: Array<{ role: string; content: string }>
+  messages: TurnMessage[]
+}
+
+export interface TurnResult {
+  ingested: number
+  summarized: boolean
+  degraded: boolean
 }
 
 export interface MemoryAdapter {
   beforeModelCall(prompt: string, topicId?: string): MemoryContext
-  afterTurn(turn: TurnPayload): void
-  onSessionEnd(sessionId: string): void
+  afterTurn(turn: TurnRecord): Promise<TurnResult>
+  onSessionEnd(sessionId: string, topicId?: string): Promise<void>
   render(context: MemoryContext): string
 }
 
-/** 创建适配器：只做钩子 → 内核调用的翻译，不含记忆规则 */
-export function createMemoryAdapter(host: MemoryHost, config: MemoryPluginConfig = defaultConfig): MemoryAdapter {
+export interface MemoryPlugin {
+  config: MemoryPluginConfig
+  storage: StoragePort
+  adapter: MemoryAdapter
+  /** 等待所有进行中的写入/总结（测试与关停用） */
+  flush(): Promise<void>
+  dispose(): void
+}
+
+function warn(ctx: DshContextLike, message: string): void {
+  try {
+    ctx.logger?.warn(`[memory] ${message}`)
+  } catch {
+    // ignore logger failures
+  }
+}
+
+function extractText(data: unknown): string {
+  if (typeof data === 'string') return data
+  if (!data || typeof data !== 'object') return ''
+  const record = data as Record<string, unknown>
+  const content = record.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => (block && typeof block === 'object' ? String((block as { text?: unknown }).text ?? '') : ''))
+      .join('')
+  }
+  if (typeof record.text === 'string') return record.text
+  return ''
+}
+
+/** cordis 插件入口 */
+export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> = {}): MemoryPlugin | null {
+  const cfg: MemoryPluginConfig = { ...defaultConfig, ...config }
+  if (!cfg.enabled) return null
+
+  const storage = createStorage({ path: cfg.dbPath })
+  const clock: ClockPort = { now: () => new Date() }
+  const llm: LLMPort | undefined = ctx.llm
+    ? createDshLlmPort(ctx.llm, {
+        provider: cfg.provider,
+        model: cfg.model,
+        ...(cfg.system ? { system: cfg.system } : {}),
+      })
+    : undefined
+
+  const pending = new Map<string, TurnMessage[]>()
+  const inflight = new Set<Promise<unknown>>()
+  let lastQuery = ''
+
+  function track<T>(promise: Promise<T>): Promise<T> {
+    inflight.add(promise as Promise<unknown>)
+    void (promise as Promise<unknown>).finally(() => inflight.delete(promise as Promise<unknown>))
+    return promise
+  }
+
   const adapter: MemoryAdapter = {
     beforeModelCall(prompt, topicId) {
       try {
-        return retrieve(host.storage, {
-          query: prompt,
-          ...(topicId ? { topicId } : {}),
-          tokenBudget: config.tokenBudget,
-          maxMemories: config.maxMemories,
+        return retrieve(storage, {
+          query: prompt || lastQuery,
+          topicId: topicId ?? cfg.defaultTopicId,
+          tokenBudget: cfg.tokenBudget,
+          maxMemories: cfg.maxMemories,
         })
       } catch (error) {
-        host.log?.('warn', `memory retrieve degraded: ${String(error)}`)
+        warn(ctx, `retrieve degraded: ${String(error)}`)
         return { topicId: topicId ?? null, memories: [], conflicts: [], tokensUsed: 0, degraded: true }
       }
     },
 
-    afterTurn(turn) {
-      // 真实实现：由 LLM 提取候选后逐条 ingest；这里用消息文本做最小演示
-      try {
-        for (const message of turn.messages) {
-          ingestCandidate(
-            {
-              topicId: 'default',
-              entity: 'session',
-              attribute: 'message',
-              value: message.content,
-              content: message.content,
-              sourceSpeaker: message.role === 'user' ? 'user' : 'assistant',
-              sourceRefs: [turn.turnId],
-            },
-            { storage: host.storage, clock: host.clock, noveltyThreshold: config.noveltyThreshold },
-          )
-        }
-      } catch (error) {
-        host.log?.('warn', `memory ingest degraded: ${String(error)}`)
+    async afterTurn(turn): Promise<TurnResult> {
+      if (!llm) {
+        warn(ctx, 'afterTurn skipped: no llm service')
+        return { ingested: 0, summarized: false, degraded: true }
       }
+      const messages = turn.messages.filter((message) => message.role !== 'system')
+      if (messages.length === 0) return { ingested: 0, summarized: false, degraded: false }
+
+      const candidates = await extractCandidates(
+        { messages, defaultTopicId: cfg.defaultTopicId, sourceRefs: [turn.turnId] },
+        { llm, maxCandidates: cfg.maxExtractPerTurn },
+      )
+
+      let ingested = 0
+      let summarized = false
+      for (const candidate of candidates) {
+        try {
+          const result = ingestCandidate(
+            { ...candidate, sourceRefs: [turn.turnId] },
+            { storage, clock, noveltyThreshold: cfg.noveltyThreshold, tenantId: cfg.tenantId },
+          )
+          if (result.memoryId) ingested++
+          if (result.summarizeSuggested) {
+            const summary = await runSummary(cfg.defaultTopicId, {
+              storage,
+              clock,
+              llm,
+              tenantId: cfg.tenantId,
+              noveltyThreshold: cfg.noveltyThreshold,
+              force: result.decision === 'CORRECTION',
+            })
+            if (summary.status === 'ACTIVE') summarized = true
+          }
+        } catch (error) {
+          warn(ctx, `ingest degraded: ${String(error)}`)
+        }
+      }
+      return { ingested, summarized, degraded: false }
     },
 
-    onSessionEnd(_sessionId) {
-      // 真实实现：flush pending、触发总结判定
+    async onSessionEnd(_sessionId, topicId): Promise<void> {
+      if (!llm) return
+      try {
+        await runSummary(topicId ?? cfg.defaultTopicId, {
+          storage,
+          clock,
+          llm,
+          tenantId: cfg.tenantId,
+          noveltyThreshold: cfg.noveltyThreshold,
+        })
+      } catch (error) {
+        warn(ctx, `session-end summary degraded: ${String(error)}`)
+      }
     },
 
     render: renderMemoryContext,
   }
 
-  host.addPromptSection?.('memory', () => {
-    // 真实实现：按当前 query 调 beforeModelCall；这里返回占位，避免假设宿主时序
-    return ''
-  })
-
-  host.registerTool?.({
-    name: 'memory_search',
-    description: '检索长期记忆（主题、决策、偏好、约束）',
-    parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
-    async execute(input) {
-      const context = adapter.beforeModelCall(String(input.query ?? ''))
-      return { memories: context.memories, degraded: context.degraded }
+  // 1) 系统提示词注入：每次组装时按最近用户消息检索（同步，受 token 预算约束）
+  ctx.systemPrompt?.section({
+    name: 'memory:context',
+    order: cfg.sectionOrder,
+    text: () => {
+      if (!lastQuery) return ''
+      const context = adapter.beforeModelCall(lastQuery, cfg.defaultTopicId)
+      return adapter.render(context)
     },
   })
 
-  return adapter
-}
+  // 2) 工具：memory_search
+  ctx.tools?.register({
+    name: 'memory_search',
+    description: '检索长期记忆（事实、决策、偏好、约束），返回相关记忆与未消解冲突。',
+    parameters: {
+      query: { type: 'string', required: true, description: '检索关键词或问题' },
+      topicId: { type: 'string', description: '限定主题（可选）' },
+    },
+    output: { schema: { type: 'object' } },
+    async execute(args: Record<string, unknown>) {
+      const topicId = typeof args.topicId === 'string' ? args.topicId : undefined
+      const context = adapter.beforeModelCall(String(args.query ?? ''), topicId)
+      return {
+        memories: context.memories.map((memory) => ({ content: memory.content, modality: memory.modality })),
+        conflicts: context.conflicts,
+        degraded: context.degraded,
+      }
+    },
+  })
 
-/** 供未来总结流程使用 */
-export function summaryDue(storage: StoragePort, topicId: string, threshold: number): boolean {
-  return shouldSummarize(storage.pendingNovelty(topicId), threshold)
+  // 3) 会话事件：累积一轮消息，turn/end 时提取写入（不阻塞）
+  ctx.on?.('session/event', (payload) => {
+    const event = payload as { type?: string; data?: Record<string, unknown> } | undefined
+    if (!event?.type) return
+    const data = event.data ?? {}
+    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : 'default'
+
+    if (event.type === 'user/message') {
+      const text = extractText(data)
+      if (text) {
+        lastQuery = text
+        const list = pending.get(sessionId) ?? []
+        list.push({ role: 'user', content: text })
+        pending.set(sessionId, list)
+      }
+      return
+    }
+    if (event.type === 'assistant/message') {
+      const text = extractText(data)
+      if (text) {
+        const list = pending.get(sessionId) ?? []
+        list.push({ role: 'assistant', content: text })
+        pending.set(sessionId, list)
+      }
+      return
+    }
+    if (event.type === 'turn/end') {
+      const messages = pending.get(sessionId) ?? []
+      pending.set(sessionId, [])
+      if (messages.length === 0) return
+      const turnId = typeof data.turnId === 'string' ? data.turnId : String(data.seq ?? Date.now())
+      track(adapter.afterTurn({ sessionId, turnId, messages })).catch((error) => {
+        warn(ctx, `turn ingest degraded: ${String(error)}`)
+      })
+    }
+  })
+
+  return {
+    config: cfg,
+    storage,
+    adapter,
+    async flush() {
+      while (inflight.size > 0) {
+        await Promise.allSettled([...inflight])
+      }
+    },
+    dispose() {
+      pending.clear()
+      storage.close()
+    },
+  }
 }
