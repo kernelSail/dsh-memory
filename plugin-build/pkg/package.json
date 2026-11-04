@@ -20,7 +20,8 @@
       "platform": "web",
       "external": [
         "react",
-        "react/jsx-runtime"
+        "react/jsx-runtime",
+        "react-dom"
       ]
     }
   },

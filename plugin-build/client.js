@@ -8,6 +8,14 @@
 const React = require('react')
 
 const h = React.createElement
+/** react-dom 用于全屏时 portal 到 body，脱离设置面板的容器/transform 限制。 */
+const ReactDOM = (() => {
+  try {
+    return require('react-dom')
+  } catch {
+    return null
+  }
+})()
 const API = '/plugins/dsh-memory'
 
 const styles = {
@@ -607,6 +615,17 @@ function MemorySpace(props) {
   const [busy, setBusy] = React.useState(false)
   // 诊断：画布尺寸 / 节点数 / 是否有 2D 上下文（画布不可用时回退成 DOM 列表）
   const [diag, setDiag] = React.useState({ w: 0, h: 0, nodes: 0, links: 0, ctx: true })
+  // 全屏：脱离设置面板/右侧栏的容器限制，铺满整个应用窗口
+  const [expanded, setExpanded] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!expanded) return
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setExpanded(false)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [expanded])
 
   React.useEffect(() => {
     selectedRef.current = selectedId
@@ -711,7 +730,8 @@ function MemorySpace(props) {
       cancelAnimationFrame(rafRef.current)
       observer?.disconnect()
     }
-  }, [])
+    // expanded 改变时 canvas 会经 portal 重建 DOM，必须重新初始化尺寸与循环
+  }, [expanded])
 
   const hitTest = React.useCallback((clientX, clientY) => {
     const canvas = canvasRef.current
@@ -782,7 +802,7 @@ function MemorySpace(props) {
       event.stopPropagation()
       const factor = Math.exp(-event.deltaY * 0.0022)
       const next = viewRef.current.zoom * factor
-      viewRef.current.zoom = Math.max(0.2, Math.min(6, next))
+      viewRef.current.zoom = Math.max(0.12, Math.min(20, next))
     }
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
@@ -796,7 +816,7 @@ function MemorySpace(props) {
       canvas.removeEventListener('pointerleave', onPointerLeave)
       wrap.removeEventListener('wheel', onWheel, { capture: true })
     }
-  }, [hitTest])
+  }, [hitTest, expanded])
 
   const selectedNode = graph && selectedId ? graph.nodes.find((node) => node.id === selectedId) : null
 
@@ -821,12 +841,21 @@ function MemorySpace(props) {
 
   const degraded = diag.nodes > 0 && (!diag.ctx || diag.w < 40 || diag.h < 40)
   const memoryNodes = graph ? graph.nodes.filter((node) => node.kind === 'memory') : []
-
-  return h(
-    'div',
-    {
-      ref: wrapRef,
-      style: {
+  const spaceStyle = expanded
+    ? {
+        position: 'fixed',
+        left: 0,
+        top: 0,
+        width: '100vw',
+        height: '100vh',
+        zIndex: 2147483000,
+        overflow: 'hidden',
+        borderRadius: 0,
+        border: 'none',
+        background:
+          'radial-gradient(ellipse at 50% 40%, rgba(80,130,255,0.14), transparent 62%), var(--dsw-alias-bg-base, #0d1117)',
+      }
+    : {
         position: 'relative',
         width: '100%',
         height: '100%',
@@ -835,7 +864,13 @@ function MemorySpace(props) {
         overflow: 'hidden',
         background: 'radial-gradient(ellipse at 50% 42%, rgba(80,130,255,0.10), transparent 62%)',
         border: '1px solid rgba(127,127,127,.16)',
-      },
+      }
+
+  const space = h(
+    'div',
+    {
+      ref: wrapRef,
+      style: spaceStyle,
     },
     h('canvas', {
       ref: canvasRef,
@@ -951,7 +986,7 @@ function MemorySpace(props) {
           style: { ...styles.button, padding: '1px 7px', fontSize: 14, lineHeight: 1.4 },
           title: '放大',
           onClick: () => {
-            viewRef.current.zoom = Math.min(6, viewRef.current.zoom * 1.35)
+            viewRef.current.zoom = Math.min(20, viewRef.current.zoom * 1.4)
           },
         },
         '＋',
@@ -962,7 +997,7 @@ function MemorySpace(props) {
           style: { ...styles.button, padding: '1px 7px', fontSize: 14, lineHeight: 1.4 },
           title: '缩小',
           onClick: () => {
-            viewRef.current.zoom = Math.max(0.2, viewRef.current.zoom / 1.35)
+            viewRef.current.zoom = Math.max(0.12, viewRef.current.zoom / 1.4)
           },
         },
         '－',
@@ -980,8 +1015,24 @@ function MemorySpace(props) {
         },
         '⟳',
       ),
+      h(
+        'button',
+        {
+          style: { ...styles.button, padding: '1px 7px', fontSize: 12, lineHeight: 1.4 },
+          title: expanded ? '退出全屏（Esc）' : '全屏：铺满整个窗口，超出设置面板',
+          onClick: () => setExpanded((value) => !value),
+        },
+        expanded ? '⤢' : '⛶',
+      ),
     ),
   )
+
+  // 全屏时 portal 到 document.body：设置面板/右侧栏的 overflow、transform
+  // 都不会再裁剪它，空间视图可以铺满整个应用窗口。
+  if (expanded && ReactDOM && typeof ReactDOM.createPortal === 'function' && typeof document !== 'undefined') {
+    return ReactDOM.createPortal(space, document.body)
+  }
+  return space
 }
 
 /** 右侧栏 tab 类型的实现标识（同时用作 body/title 插槽的 key）。 */

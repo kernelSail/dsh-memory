@@ -26,7 +26,7 @@ const clientResult = await build({
   format: 'cjs',
   platform: 'browser',
   target: 'es2022',
-  external: ['react', 'react/jsx-runtime'],
+  external: ['react', 'react/jsx-runtime', 'react-dom'],
   write: false,
   logLevel: 'warning',
 })
