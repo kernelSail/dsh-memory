@@ -64,7 +64,7 @@ export interface DshContextLike {
     }): unknown
   }
   tools?: { register(tool: unknown): unknown }
-  on?: (event: string, handler: (payload: unknown) => void) => unknown
+  on?: (event: string, handler: (session: unknown, event: unknown) => void) => unknown
   logger?: { warn(message: string): void; info?(message: string): void }
 }
 
@@ -241,7 +241,12 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
       query: { type: 'string', required: true, description: '检索关键词或问题' },
       topicId: { type: 'string', description: '限定主题（可选）' },
     },
-    output: { schema: { type: 'object' } },
+    output: {
+      schema: { type: 'object' },
+      render: (_args: unknown, value: unknown) => [
+        { type: 'text', text: JSON.stringify(value) },
+      ],
+    },
     async execute(args: Record<string, unknown>) {
       const topicId = typeof args.topicId === 'string' ? args.topicId : undefined
       const context = adapter.beforeModelCall(String(args.query ?? ''), topicId)
@@ -254,13 +259,23 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
   })
 
   // 3) 会话事件：累积一轮消息，turn/end 时提取写入（不阻塞）
-  ctx.on?.('session/event', (payload) => {
-    const event = payload as { type?: string; data?: Record<string, unknown> } | undefined
-    if (!event?.type) return
-    const data = event.data ?? {}
-    const sessionId = typeof data.sessionId === 'string' ? data.sessionId : 'default'
+  ctx.on?.('session/event', (session: unknown, event: unknown) => {
+    const evt = event as { type?: string; data?: Record<string, unknown> } | undefined
+    if (!evt?.type) return
+    const data = evt.data ?? {}
+    const sessionRecord = session as { header?: { id?: unknown }; id?: unknown } | undefined
+    const sessionId =
+      typeof sessionRecord?.header?.id === 'string'
+        ? sessionRecord.header.id
+        : typeof sessionRecord?.id === 'string'
+          ? sessionRecord.id
+          : 'default'
 
-    if (event.type === 'user/message') {
+    if (evt.type === 'user/message') {
+      // 只取真实用户消息，跳过 runtime context / skill reminder 等注入消息
+      const source = data.source as { kind?: string } | undefined
+      if (data.role !== 'user') return
+      if (source?.kind && source.kind !== 'user') return
       const text = extractText(data)
       if (text) {
         lastQuery = text
@@ -270,8 +285,9 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
       }
       return
     }
-    if (event.type === 'assistant/message') {
-      const text = extractText(data)
+    if (evt.type === 'assistant/message') {
+      const message = (data.message ?? data) as Record<string, unknown>
+      const text = extractText(message)
       if (text) {
         const list = pending.get(sessionId) ?? []
         list.push({ role: 'assistant', content: text })
@@ -279,11 +295,11 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
       }
       return
     }
-    if (event.type === 'turn/end') {
+    if (evt.type === 'turn/end') {
       const messages = pending.get(sessionId) ?? []
       pending.set(sessionId, [])
       if (messages.length === 0) return
-      const turnId = typeof data.turnId === 'string' ? data.turnId : String(data.seq ?? Date.now())
+      const turnId = data.turn !== undefined ? String(data.turn) : String(data.seq ?? Date.now())
       track(adapter.afterTurn({ sessionId, turnId, messages })).catch((error) => {
         warn(ctx, `turn ingest degraded: ${String(error)}`)
       })

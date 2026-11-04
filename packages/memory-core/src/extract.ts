@@ -79,7 +79,8 @@ export function parseCandidates(raw: unknown, input: ExtractInput = { messages: 
     const exceptions = Array.isArray(raw.exceptions) ? raw.exceptions.map(String) : undefined
 
     candidates.push({
-      topicId: asString(raw.topicId) || input.defaultTopicId || 'default',
+      // 主题分类留待 V1.2；当前由调用方指定主题，避免模型自造 topic 导致检索不到
+      topicId: input.defaultTopicId || asString(raw.topicId) || 'default',
       entity,
       attribute,
       value,

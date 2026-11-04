@@ -18,7 +18,7 @@ interface FakeCtx {
 function makeCtx(payload: unknown): FakeCtx {
   const sections: SectionEntry[] = []
   const tools: Array<Record<string, unknown>> = []
-  let handler: ((payload: unknown) => void) | undefined
+  let handler: ((session: unknown, event: unknown) => void) | undefined
 
   const llm = {
     async *stream(): AsyncGenerator<DshStreamChunk> {
@@ -38,7 +38,7 @@ function makeCtx(payload: unknown): FakeCtx {
     sections,
     tools,
     emit(type, data = {}) {
-      handler?.({ type, data })
+      handler?.({ header: { id: 'smoke-session' } }, { type, data })
     },
   }
 }
@@ -64,9 +64,15 @@ describe('DSH 插件：真实接线', () => {
     const plugin = apply(fake.ctx, { dbPath: ':memory:' })
     expect(plugin).not.toBeNull()
 
-    fake.emit('user/message', { content: '权限模型' })
-    fake.emit('assistant/message', { content: '好的' })
-    fake.emit('turn/end', { turnId: 't1' })
+    fake.emit('user/message', {
+      role: 'user',
+      content: [{ type: 'text', text: '权限模型' }],
+      source: { kind: 'user' },
+    })
+    fake.emit('assistant/message', {
+      message: { role: 'assistant', content: [{ type: 'text', text: '好的' }] },
+    })
+    fake.emit('turn/end', { turn: 1 })
     await plugin?.flush()
 
     const section = fake.sections[0]
