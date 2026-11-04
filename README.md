@@ -64,9 +64,18 @@ node_modules/.bin/esbuild plugin-build/entry.ts --bundle --format=esm \
 - 数据库：`D:\study\deepseek-work\dsh-memory\live-memory.db`；
 - 关闭：删除该 `insert` 块（HMR 会卸载），或把插件配置改为 `enabled: false`。
 
+## 本轮优化（2026-11-04）
+
+| 优化 | 实现 | 验证 |
+|---|---|---|
+| 批量提取 | `extractBatchTurns`（默认 4）：轮末入缓冲，满 4 轮才调一次 LLM；关停时 `flush()` 处理尾巴 | 3 轮不调模型、第 4 轮仅 1 次调用 |
+| 主题分类 | 提取提示带上已有主题并复用；topic 规范化 slug；检索本主题无命中时跨主题回退 | 跨主题检索、slug 规范化测试 |
+| 显式写入 | 新增 `memory_write` 工具（entity/attribute/value/content/topic/validFrom/validUntil） | 写入返回 NEW_FACT 并落库 |
+| TEMPORAL | `valid_from/valid_until` 入库（迁移 7）；裁决赛第一级为时间窗 | 时间窗不重叠时按参考时间裁决 |
+
 ## 已知限制
 
-- 每轮 `turn/end` 都触发一次提取 LLM 调用（尚未做 4 轮批量），成本高于设计估算；
-- 主题分类未启用，统一落到 `defaultTopicId`；
-- 只有 `memory_search` 工具，没有显式 `memory_write`；
-- 冲突 `TEMPORAL` 策略未启用（记录未带 valid_from/valid_until）。
+- 每批提取仍需一次 LLM 调用；对话不足 4 轮时关停会补一次（由 `flush` 触发）；
+- 主题由 LLM 生成，尚无人工确认/合并机制；
+- `memory_write` 不做实体归一化建议，写入质量依赖调用方；
+- `TEMPORAL` 只比较「参考时间点是否有效」，不处理部分重叠的复杂窗口。

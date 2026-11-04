@@ -12,6 +12,7 @@ interface FakeCtx {
   ctx: DshContextLike
   sections: SectionEntry[]
   tools: Array<Record<string, unknown>>
+  llmCalls: () => number
   emit(type: string, data?: Record<string, unknown>): void
 }
 
@@ -19,9 +20,11 @@ function makeCtx(payload: unknown): FakeCtx {
   const sections: SectionEntry[] = []
   const tools: Array<Record<string, unknown>> = []
   let handler: ((session: unknown, event: unknown) => void) | undefined
+  let calls = 0
 
   const llm = {
     async *stream(): AsyncGenerator<DshStreamChunk> {
+      calls++
       yield { type: 'text-delta', index: 0, text: JSON.stringify(payload) }
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
@@ -37,10 +40,23 @@ function makeCtx(payload: unknown): FakeCtx {
     },
     sections,
     tools,
+    llmCalls: () => calls,
     emit(type, data = {}) {
       handler?.({ header: { id: 'smoke-session' } }, { type, data })
     },
   }
+}
+
+function emitTurn(fake: FakeCtx, text: string): void {
+  fake.emit('user/message', {
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  })
+  fake.emit('assistant/message', {
+    message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+  })
+  fake.emit('turn/end', { turn: 1 })
 }
 
 const extraction = {
@@ -143,6 +159,37 @@ describe('DSH 插件：真实接线', () => {
     }
     const result = await tool.execute({ query: '完全不存在的主题' })
     expect(result.memories).toHaveLength(0)
+    plugin?.dispose()
+  })
+
+  it('turn 批量提取：3 轮不调用模型，第 4 轮只调用 1 次', async () => {
+    const fake = makeCtx(extraction)
+    const plugin = apply(fake.ctx, { dbPath: ':memory:', extractBatchTurns: 4 })
+    expect(plugin).not.toBeNull()
+
+    emitTurn(fake, '第一轮')
+    emitTurn(fake, '第二轮')
+    emitTurn(fake, '第三轮')
+    expect(fake.llmCalls()).toBe(0)
+
+    emitTurn(fake, '第四轮')
+    await plugin?.flush()
+    expect(fake.llmCalls()).toBe(1)
+    expect(plugin?.storage.listMemories('default').length).toBeGreaterThan(0)
+    plugin?.dispose()
+  })
+
+  it('memory_write 显式写入并返回 decision', async () => {
+    const fake = makeCtx(extraction)
+    const plugin = apply(fake.ctx, { dbPath: ':memory:' })
+    const writeTool = fake.tools.find((tool) => tool.name === 'memory_write') as unknown as {
+      execute(input: Record<string, unknown>): Promise<{ decision: string; memoryId: string | null }>
+    }
+    expect(writeTool).toBeDefined()
+    const result = await writeTool.execute({ entity: 'project', attribute: 'db', value: 'postgres' })
+    expect(result.decision).toBe('NEW_FACT')
+    expect(result.memoryId).toBeTruthy()
+    expect(plugin?.storage.listMemories('default')).toHaveLength(1)
     plugin?.dispose()
   })
 })

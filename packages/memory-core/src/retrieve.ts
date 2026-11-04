@@ -28,10 +28,15 @@ export function retrieve(storage: StoragePort, options: RetrieveOptions): Memory
   const maxMemories = options.maxMemories ?? 12
   const tokenBudget = options.tokenBudget ?? 4000
 
-  const raw = storage.search(options.query, {
+  const limit = Math.max(maxMemories * 4, 40)
+  let raw = storage.search(options.query, {
     ...(options.topicId ? { topicId: options.topicId } : {}),
-    limit: Math.max(maxMemories * 4, 40),
+    limit,
   })
+  // 主题分类后 memory 可能落在其他 topic：本主题无命中时跨主题回退
+  if (raw.length === 0 && options.topicId) {
+    raw = storage.search(options.query, { limit })
+  }
 
   const active = raw.filter((m) => m.status === 'ACTIVE')
 
@@ -56,11 +61,12 @@ export function retrieve(storage: StoragePort, options: RetrieveOptions): Memory
     tokensUsed += cost
   }
 
-  // 冲突组：只保留与已选事实相关的组
+  // 冲突组：只保留与已选事实相关的组（跨已选记忆所属主题收集）
   const selectedKeys = new Set(selected.map((m) => m.factKey))
-  const groups: ConflictGroup[] = options.topicId
-    ? storage.listConflictsByTopic(options.topicId).filter((group) => selectedKeys.has(group.factKey))
-    : []
+  const selectedTopics = new Set(selected.map((m) => m.topicId))
+  const groups: ConflictGroup[] = [...selectedTopics]
+    .flatMap((topicId) => storage.listConflictsByTopic(topicId))
+    .filter((group) => selectedKeys.has(group.factKey))
 
   // 未消解冲突必须成组注入（§11.4.1 硬约束 1）
   for (const group of groups) {

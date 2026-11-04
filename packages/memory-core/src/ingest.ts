@@ -75,6 +75,8 @@ function buildRecord(candidate: MemoryCandidate, deps: IngestDeps, now: Date): M
     supersededBy: null,
     deletedAt: null,
     tombstoneHash: null,
+    validFrom: candidate.validFrom ?? null,
+    validUntil: candidate.validUntil ?? null,
   }
 }
 

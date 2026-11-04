@@ -18,17 +18,33 @@ function newestFirst(members: MemoryRecord[]): MemoryRecord[] {
   return [...members].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
 }
 
+/** 记忆在给定时间点是否有效（null 表示开区间） */
+export function isValidAt(memory: MemoryRecord, at: Date): boolean {
+  const from = memory.validFrom ? Date.parse(memory.validFrom) : Number.NEGATIVE_INFINITY
+  const until = memory.validUntil ? Date.parse(memory.validUntil) : Number.POSITIVE_INFINITY
+  const t = at.getTime()
+  if (Number.isFinite(from) && t < from) return false
+  if (Number.isFinite(until) && t > until) return false
+  return true
+}
+
 /**
  * 冲突裁决（§11.4.1）：按序短路。
- * 1) 来源优先级 → 2) 置信度差 ≥ 0.2 → 3) 新近 → 4) UNRESOLVED
- * TEMPORAL 需要有效时间窗，V1.1 记录未带 valid_from/until，暂不启用。
+ * 1) TEMPORAL（有效时间窗）→ 2) 来源优先级 → 3) 置信度差 ≥ 0.2 → 4) 新近 → 5) UNRESOLVED
  */
-export function resolveConflict(members: MemoryRecord[]): Resolution {
+export function resolveConflict(members: MemoryRecord[], at: Date = new Date()): Resolution {
   if (members.length === 0) {
     return { winnerMemoryId: null, policy: 'UNRESOLVED', reason: '无冲突成员' }
   }
   if (members.length === 1) {
     return { winnerMemoryId: members[0]?.id ?? null, policy: 'SOURCE_PRIORITY', reason: '单成员' }
+  }
+
+  // TEMPORAL：若恰好只有一条在参考时间点有效，直接胜出
+  const validNow = members.filter((m) => isValidAt(m, at))
+  if (validNow.length === 1) {
+    const winner = validNow[0] as MemoryRecord
+    return { winnerMemoryId: winner.id, policy: 'TEMPORAL', reason: '参考时间点仅一条有效' }
   }
 
   const ranks = members.map((m) => SOURCE_RANK[m.sourceSpeaker] ?? 0)

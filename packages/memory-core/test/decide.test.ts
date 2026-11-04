@@ -29,6 +29,8 @@ function record(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
     supersededBy: null,
     deletedAt: null,
     tombstoneHash: null,
+    validFrom: null,
+    validUntil: null,
     ...overrides,
   }
 }

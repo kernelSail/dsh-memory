@@ -29,6 +29,8 @@ function record(overrides: Partial<MemoryRecord> & { sourceSpeaker?: SourceSpeak
     supersededBy: null,
     deletedAt: null,
     tombstoneHash: null,
+    validFrom: null,
+    validUntil: null,
     ...overrides,
   }
 }
@@ -65,6 +67,19 @@ describe('resolveConflict：5 级裁决策略', () => {
     ])
     expect(r.policy).toBe('UNRESOLVED')
     expect(r.winnerMemoryId).toBeNull()
+  })
+
+  it('TEMPORAL：参考时间点仅一条有效', () => {
+    const old = record({
+      id: 'old',
+      sourceSpeaker: 'tool',
+      validFrom: '2025-01-01T00:00:00.000Z',
+      validUntil: '2025-12-31T23:59:59.000Z',
+    })
+    const current = record({ id: 'current', sourceSpeaker: 'tool', validFrom: '2026-01-01T00:00:00.000Z' })
+    const r = resolveConflict([old, current], new Date('2026-06-01T00:00:00.000Z'))
+    expect(r.policy).toBe('TEMPORAL')
+    expect(r.winnerMemoryId).toBe('current')
   })
 
   it('单成员直接胜出', () => {

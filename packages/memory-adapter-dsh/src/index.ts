@@ -35,6 +35,8 @@ export interface MemoryPluginConfig {
   /** systemPrompt 段顺序（越小越靠前） */
   sectionOrder: number
   maxExtractPerTurn: number
+  /** 每 N 轮对话做一次提取（1 = 每轮）；降低 LLM 调用成本 */
+  extractBatchTurns: number
 }
 
 export const defaultConfig: MemoryPluginConfig = {
@@ -50,6 +52,7 @@ export const defaultConfig: MemoryPluginConfig = {
   tokenBudget: 4000,
   sectionOrder: 50,
   maxExtractPerTurn: 8,
+  extractBatchTurns: 4,
 }
 
 /** DSH cordis ctx 的最小结构类型（只用到的字段） */
@@ -149,6 +152,71 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
     return promise
   }
 
+  const turnBuffer: TurnRecord[] = []
+
+  /** 批量提取：N 轮对话合并为一次 LLM 调用（§7 成本优化） */
+  async function extractBatch(turns: TurnRecord[]): Promise<TurnResult> {
+    if (!llm) {
+      warn(ctx, 'afterTurn skipped: no llm service')
+      return { ingested: 0, summarized: false, degraded: true }
+    }
+    const messages = turns.flatMap((turn) => turn.messages.filter((message) => message.role !== 'system'))
+    if (messages.length === 0) return { ingested: 0, summarized: false, degraded: false }
+
+    const sourceRefs = turns.map((turn) => turn.turnId)
+    const candidates = await extractCandidates(
+      {
+        messages,
+        defaultTopicId: cfg.defaultTopicId,
+        topicHints: storage.listTopics(cfg.tenantId),
+        sourceRefs,
+      },
+      { llm, maxCandidates: cfg.maxExtractPerTurn },
+    )
+
+    let ingested = 0
+    let summarized = false
+    const summaryTopics = new Set<string>()
+
+    for (const candidate of candidates) {
+      try {
+        const result = ingestCandidate(
+          { ...candidate, sourceRefs },
+          { storage, clock, noveltyThreshold: cfg.noveltyThreshold, tenantId: cfg.tenantId },
+        )
+        if (result.memoryId) ingested++
+        if (result.summarizeSuggested) summaryTopics.add(candidate.topicId)
+      } catch (error) {
+        warn(ctx, `ingest degraded: ${String(error)}`)
+      }
+    }
+
+    for (const topicId of summaryTopics) {
+      try {
+        const summary = await runSummary(topicId, {
+          storage,
+          clock,
+          llm,
+          tenantId: cfg.tenantId,
+          noveltyThreshold: cfg.noveltyThreshold,
+          force: true,
+        })
+        if (summary.status === 'ACTIVE') summarized = true
+      } catch (error) {
+        warn(ctx, `summary degraded: ${String(error)}`)
+      }
+    }
+
+    return { ingested, summarized, degraded: false }
+  }
+
+  function enqueueTurn(turn: TurnRecord): void {
+    turnBuffer.push(turn)
+    if (turnBuffer.length < cfg.extractBatchTurns) return
+    const batch = turnBuffer.splice(0, turnBuffer.length)
+    track(extractBatch(batch)).catch((error) => warn(ctx, `batch ingest degraded: ${String(error)}`))
+  }
+
   const adapter: MemoryAdapter = {
     beforeModelCall(prompt, topicId) {
       try {
@@ -165,46 +233,19 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
     },
 
     async afterTurn(turn): Promise<TurnResult> {
-      if (!llm) {
-        warn(ctx, 'afterTurn skipped: no llm service')
-        return { ingested: 0, summarized: false, degraded: true }
-      }
-      const messages = turn.messages.filter((message) => message.role !== 'system')
-      if (messages.length === 0) return { ingested: 0, summarized: false, degraded: false }
-
-      const candidates = await extractCandidates(
-        { messages, defaultTopicId: cfg.defaultTopicId, sourceRefs: [turn.turnId] },
-        { llm, maxCandidates: cfg.maxExtractPerTurn },
-      )
-
-      let ingested = 0
-      let summarized = false
-      for (const candidate of candidates) {
-        try {
-          const result = ingestCandidate(
-            { ...candidate, sourceRefs: [turn.turnId] },
-            { storage, clock, noveltyThreshold: cfg.noveltyThreshold, tenantId: cfg.tenantId },
-          )
-          if (result.memoryId) ingested++
-          if (result.summarizeSuggested) {
-            const summary = await runSummary(cfg.defaultTopicId, {
-              storage,
-              clock,
-              llm,
-              tenantId: cfg.tenantId,
-              noveltyThreshold: cfg.noveltyThreshold,
-              force: result.decision === 'CORRECTION',
-            })
-            if (summary.status === 'ACTIVE') summarized = true
-          }
-        } catch (error) {
-          warn(ctx, `ingest degraded: ${String(error)}`)
-        }
-      }
-      return { ingested, summarized, degraded: false }
+      // 直接调用不经过批量缓冲（供宿主/测试手动触发）
+      return extractBatch([turn])
     },
 
     async onSessionEnd(_sessionId, topicId): Promise<void> {
+      try {
+        while (turnBuffer.length > 0) {
+          const batch = turnBuffer.splice(0, turnBuffer.length)
+          await extractBatch(batch)
+        }
+      } catch {
+        // ignore
+      }
       if (!llm) return
       try {
         await runSummary(topicId ?? cfg.defaultTopicId, {
@@ -258,6 +299,55 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
     },
   })
 
+  // 2b) 工具：memory_write（显式写入一条结构化记忆）
+  ctx.tools?.register({
+    name: 'memory_write',
+    description: '显式写入一条长期记忆（事实槽位：entity + attribute + value）。用户要求「记住」时使用。',
+    parameters: {
+      entity: { type: 'string', required: true, description: '实体（项目/用户/技术/组织）' },
+      attribute: { type: 'string', required: true, description: '属性名' },
+      value: { type: 'string', required: true, description: '属性值' },
+      content: { type: 'string', description: '人类可读表述（可选）' },
+      topicId: { type: 'string', description: '主题（可选，默认 defaultTopicId）' },
+      modality: { type: 'string', description: 'asserted|planned|hypothetical|question|quoted' },
+      validFrom: { type: 'string', description: '生效时间 ISO（可选）' },
+      validUntil: { type: 'string', description: '失效时间 ISO（可选）' },
+    },
+    output: {
+      schema: { type: 'object' },
+      render: (_args: unknown, value: unknown) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args: Record<string, unknown>) {
+      const modalityValues = ['asserted', 'planned', 'hypothetical', 'question', 'quoted']
+      const modality = modalityValues.includes(String(args.modality))
+        ? (String(args.modality) as 'asserted' | 'planned' | 'hypothetical' | 'question' | 'quoted')
+        : 'asserted'
+      const result = ingestCandidate(
+        {
+          tenantId: cfg.tenantId,
+          topicId: typeof args.topicId === 'string' && args.topicId ? args.topicId : cfg.defaultTopicId,
+          entity: String(args.entity ?? ''),
+          attribute: String(args.attribute ?? ''),
+          value: String(args.value ?? ''),
+          content: typeof args.content === 'string' ? args.content : undefined,
+          modality,
+          sourceSpeaker: 'user',
+          sourceRefs: ['memory_write'],
+          intent: 'correct',
+          ...(typeof args.validFrom === 'string' ? { validFrom: args.validFrom } : {}),
+          ...(typeof args.validUntil === 'string' ? { validUntil: args.validUntil } : {}),
+        },
+        { storage, clock, tenantId: cfg.tenantId, noveltyThreshold: cfg.noveltyThreshold },
+      )
+      return {
+        decision: result.decision,
+        memoryId: result.memoryId,
+        noveltyScore: result.noveltyScore,
+        pendingNovelty: result.pendingNovelty,
+      }
+    },
+  })
+
   // 3) 会话事件：累积一轮消息，turn/end 时提取写入（不阻塞）
   ctx.on?.('session/event', (session: unknown, event: unknown) => {
     const evt = event as { type?: string; data?: Record<string, unknown> } | undefined
@@ -300,9 +390,7 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
       pending.set(sessionId, [])
       if (messages.length === 0) return
       const turnId = data.turn !== undefined ? String(data.turn) : String(data.seq ?? Date.now())
-      track(adapter.afterTurn({ sessionId, turnId, messages })).catch((error) => {
-        warn(ctx, `turn ingest degraded: ${String(error)}`)
-      })
+      enqueueTurn({ sessionId, turnId, messages })
     }
   })
 
@@ -311,8 +399,15 @@ export function apply(ctx: DshContextLike, config: Partial<MemoryPluginConfig> =
     storage,
     adapter,
     async flush() {
-      while (inflight.size > 0) {
-        await Promise.allSettled([...inflight])
+      // 先处理未满一批的尾巴，再等待在途提取/总结
+      while (turnBuffer.length > 0 || inflight.size > 0) {
+        if (turnBuffer.length > 0) {
+          const batch = turnBuffer.splice(0, turnBuffer.length)
+          await extractBatch(batch)
+        }
+        if (inflight.size > 0) {
+          await Promise.allSettled([...inflight])
+        }
       }
     },
     dispose() {

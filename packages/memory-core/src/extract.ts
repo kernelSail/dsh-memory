@@ -8,6 +8,8 @@ export interface ExtractMessage {
 export interface ExtractInput {
   messages: ExtractMessage[]
   defaultTopicId?: string
+  /** 已存在主题，提示模型优先复用 */
+  topicHints?: string[]
   sourceRefs?: string[]
 }
 
@@ -23,14 +25,17 @@ export function buildExtractPrompt(input: ExtractInput): string {
   const dialog = input.messages
     .map((message) => `${message.role}: ${message.content}`)
     .join('\n')
+  const known = (input.topicHints ?? []).slice(0, 20)
   return [
     '你是长期记忆提取器。从下面这段对话中提取值得长期记住的信息。',
     '要求：',
     '1. 一条记忆只表达一个事实槽位（entity + attribute + value）。',
     '2. 寒暄、确认语、过程性描述不提取。',
     '3. 假设/计划/否定必须保留模态：modality ∈ asserted|planned|hypothetical|question|quoted，polarity ∈ affirm|negate。',
-    '4. conditions/exceptions 仅在原文明确时填写。',
-    '5. 输出 JSON：{"candidates":[{"topicId":"...","entity":"...","attribute":"...","value":"...","content":"...","modality":"asserted","polarity":"affirm","conditions":{},"exceptions":[]}]}',
+    '4. conditions/exceptions 仅在原文明确时填写；有明确生效时间时填 validFrom/validUntil（ISO 时间）。',
+    '5. topicId 用小写 slug（如 project_architecture）；**优先复用已有主题**，没有合适的再新建。',
+    known.length > 0 ? `已有主题：${known.join(', ')}` : '已有主题：（无）',
+    '6. 输出 JSON：{"candidates":[{"topicId":"...","entity":"...","attribute":"...","value":"...","content":"...","modality":"asserted","polarity":"affirm","conditions":{},"exceptions":[],"validFrom":null,"validUntil":null}]}',
     '',
     '对话：',
     dialog,
@@ -39,6 +44,19 @@ export function buildExtractPrompt(input: ExtractInput): string {
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
+}
+
+function topicSlug(value: string): string {
+  const normalized = value.normalize('NFKC').trim().toLowerCase()
+  const slug = normalized.replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+|_+$/g, '')
+  return slug.slice(0, 60)
+}
+
+function asIso(value: unknown): string | null {
+  const text = asString(value)
+  if (!text) return null
+  const time = Date.parse(text)
+  return Number.isFinite(time) ? new Date(time).toISOString() : null
 }
 
 /** 解析并校验模型输出；非法条目丢弃而不是让整批失败 */
@@ -78,9 +96,13 @@ export function parseCandidates(raw: unknown, input: ExtractInput = { messages: 
         : undefined
     const exceptions = Array.isArray(raw.exceptions) ? raw.exceptions.map(String) : undefined
 
+    const rawTopic = topicSlug(asString(raw.topicId))
+    const topicId = rawTopic || input.defaultTopicId || 'default'
+    const validFrom = asIso(raw.validFrom)
+    const validUntil = asIso(raw.validUntil)
+
     candidates.push({
-      // 主题分类留待 V1.2；当前由调用方指定主题，避免模型自造 topic 导致检索不到
-      topicId: input.defaultTopicId || asString(raw.topicId) || 'default',
+      topicId,
       entity,
       attribute,
       value,
@@ -89,6 +111,8 @@ export function parseCandidates(raw: unknown, input: ExtractInput = { messages: 
       polarity,
       ...(conditions ? { conditions } : {}),
       ...(exceptions ? { exceptions } : {}),
+      ...(validFrom ? { validFrom } : {}),
+      ...(validUntil ? { validUntil } : {}),
       sourceSpeaker: 'user',
       sourceRefs: input.sourceRefs ?? [],
     })

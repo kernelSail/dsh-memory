@@ -146,6 +146,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE memory ADD COLUMN deleted_by TEXT;
   ALTER TABLE memory ADD COLUMN delete_reason TEXT;
   `,
+  `
+  ALTER TABLE memory ADD COLUMN valid_from TEXT;
+  ALTER TABLE memory ADD COLUMN valid_until TEXT;
+  `,
 ]
 
 export interface OpenOptions {
@@ -204,6 +208,8 @@ function rowToRecord(row: Record<string, unknown>): MemoryRecord {
     supersededBy: row.superseded_by === null ? null : String(row.superseded_by),
     deletedAt: row.deleted_at === null ? null : String(row.deleted_at),
     tombstoneHash: row.tombstone_hash === null ? null : String(row.tombstone_hash),
+    validFrom: row.valid_from == null ? null : String(row.valid_from),
+    validUntil: row.valid_until == null ? null : String(row.valid_until),
   }
 }
 
@@ -229,7 +235,7 @@ const COLUMNS = [
   'id', 'tenant_id', 'topic_id', 'entity', 'attribute', 'value', 'conditions', 'exceptions',
   'fact_key', 'value_hash', 'context_hash', 'modality', 'polarity', 'source_speaker',
   'source_refs', 'content', 'confidence', 'importance', 'hotness', 'status', 'created_at',
-  'updated_at', 'superseded_by', 'deleted_at', 'tombstone_hash',
+  'updated_at', 'superseded_by', 'deleted_at', 'tombstone_hash', 'valid_from', 'valid_until',
 ]
 
 export class SqliteStorage implements StoragePort {
@@ -282,6 +288,8 @@ export class SqliteStorage implements StoragePort {
         case 'superseded_by': return record.supersededBy
         case 'deleted_at': return record.deletedAt
         case 'tombstone_hash': return record.tombstoneHash
+        case 'valid_from': return record.validFrom
+        case 'valid_until': return record.validUntil
         default: throw new Error(`unknown column ${column}`)
       }
     })
@@ -326,6 +334,13 @@ export class SqliteStorage implements StoragePort {
       .prepare("SELECT * FROM memory WHERE topic_id = ? AND status = 'ACTIVE' AND deleted_at IS NULL ORDER BY updated_at DESC")
       .all(topicId) as Array<Record<string, unknown>>
     return rows.map(rowToRecord)
+  }
+
+  listTopics(tenantId: string = 'default'): string[] {
+    const rows = this.db
+      .prepare('SELECT DISTINCT topic_id FROM memory WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY topic_id')
+      .all(tenantId) as Array<{ topic_id: string }>
+    return rows.map((row) => row.topic_id)
   }
 
   search(query: string, opts: { topicId?: string; limit?: number } = {}): MemoryRecord[] {

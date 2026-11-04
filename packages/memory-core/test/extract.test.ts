@@ -58,4 +58,35 @@ describe('extract：候选提取', () => {
     }
     expect(await extractCandidates(input, { llm })).toEqual([])
   })
+
+  it('保留模型给出的主题并规范化 slug', () => {
+    const raw = JSON.stringify({
+      candidates: [{ topicId: 'Project Architecture', entity: 'db', attribute: 'engine', value: 'pg' }],
+    })
+    const candidates = parseCandidates(raw, input)
+    expect(candidates[0]?.topicId).toBe('project_architecture')
+  })
+
+  it('解析 validFrom / validUntil 为 ISO', () => {
+    const raw = JSON.stringify({
+      candidates: [
+        {
+          topicId: 't1',
+          entity: 'perm',
+          attribute: 'type',
+          value: 'abac',
+          validFrom: '2026-01-01',
+          validUntil: '2026-12-31',
+        },
+      ],
+    })
+    const candidate = parseCandidates(raw, input)[0]
+    expect(candidate?.validFrom).toBe('2026-01-01T00:00:00.000Z')
+    expect(candidate?.validUntil).toBe('2026-12-31T00:00:00.000Z')
+  })
+
+  it('已知主题出现在 prompt 中', () => {
+    const prompt = buildExtractPrompt({ messages: [], topicHints: ['alpha', 'beta'] })
+    expect(prompt).toContain('alpha, beta')
+  })
 })

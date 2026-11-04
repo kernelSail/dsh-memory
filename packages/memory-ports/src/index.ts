@@ -44,6 +44,9 @@ export interface MemoryCandidate {
   importance?: number
   /** 写入意图：correct = 用户显式纠正（旧值取代）；assert = 普通陈述（可能形成冲突） */
   intent?: 'assert' | 'correct'
+  /** 事实生效窗口（ISO 时间）；用于 TEMPORAL 冲突裁决 */
+  validFrom?: string | null
+  validUntil?: string | null
 }
 
 export interface MemoryRecord {
@@ -75,6 +78,8 @@ export interface MemoryRecord {
   supersededBy: string | null
   deletedAt: string | null
   tombstoneHash: string | null
+  validFrom: string | null
+  validUntil: string | null
 }
 
 export interface MemoryDecision {
@@ -164,6 +169,8 @@ export interface StoragePort {
   clearAll(tenantId?: string): void
   /** 硬删内容：仅允许已 forget 的记录，保留 tombstone_hash 与审计 */
   purgeMemory(memoryId: string, purgedAt: string): void
+  /** 已知主题（用于提取提示与跨主题检索回退） */
+  listTopics(tenantId?: string): string[]
 }
 
 export interface LLMRequest {
