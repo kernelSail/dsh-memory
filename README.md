@@ -53,10 +53,41 @@ pnpm install
 pnpm test        # 50 tests
 pnpm typecheck
 
-# 重新打单文件插件（DSH 加载用）
-node_modules/.bin/esbuild plugin-build/entry.ts --bundle --format=esm \
-  --platform=node --target=node22 --outfile=plugin-build/dist/index.js
+# 重新打包插件（dist + 可安装包）
+pnpm build:plugin
 ```
+
+## 安装到 DSH（作为设置页可见的插件包）
+
+裸 `insert` 一个 `file://` 模块虽然能跑，但**不会出现在「设置 → 插件」**：设置页的插件清单从 Loader 条目读取包元信息（`locale/*.json` 的 `meta.title`），而 app-boot 对文件 URL 不做包解析、直接返回无元信息。
+
+正确做法是作为 bundle 安装：
+
+```bash
+# 1) 把 plugin-build/pkg 放进 profile（可在 profile 目录内，供 file: 依赖使用）
+cp -r plugin-build/pkg ~/.dsh/profiles/desktop/.local-plugins/dsh-memory-plugin
+
+# 2) profile 目录里建 node_modules junction
+#    C:\Users\liuwei\.dsh\profiles\desktop\node_modules\dsh-memory-plugin -> .local-plugins/dsh-memory-plugin
+
+# 3) profile package.json 声明依赖与 bundle
+#    dependencies."dsh-memory-plugin" = "file:.local-plugins/dsh-memory-plugin"
+#    dsh.profile.bundles += "dsh-memory-plugin"
+
+# 4) profile cordis.patch.yml 里不再需要 memory 插件的 insert 块（由包内 bundle patch 负责）
+```
+
+包结构：
+
+```
+plugin-build/pkg/
+  package.json        # dsh.bundle.patch + dsh.manifestVersion
+  cordis.patch.yml    # insert dsh-memory-plugin（含 dbPath / provider 配置）
+  lib/index.js        # esbuild 产物
+  locale/{zh,en}.json # 设置页显示名与描述
+```
+
+> bundle 列表变化需要**重启 DSH** 才会重新组合 Loader；改配置块（`cordis.patch.yml`）才走 HMR 热更新。
 
 ## 成本（估算，批量提取后）
 
@@ -76,9 +107,11 @@ node_modules/.bin/esbuild plugin-build/entry.ts --bundle --format=esm \
 
 ## 启用 / 关闭（本机）
 
-- 配置：`~/.dsh/profiles/desktop/cordis.patch.yml` 末尾的 `insert` 块；
+- 安装：profile 的 `node_modules/dsh-memory-plugin`（指向 `.local-plugins/`）+ `package.json` 的 `dsh.profile.bundles`；
+- 配置：插件包内 `cordis.patch.yml`（dbPath / provider / model / extractBatchTurns）；
 - 数据库：`D:\study\deepseek-work\dsh-memory\live-memory.db`；
-- 关闭：删除该 `insert` 块（HMR 会卸载），或把插件配置改为 `enabled: false`。
+- 关闭：从 `dsh.profile.bundles` 移除 `dsh-memory-plugin`（需重启），或在 bundle patch 里把配置改为 `enabled: false`。
+- 设置页可见性：需要**重启 DSH**（bundle 列表变更不热更新）。
 
 ## 本轮优化（2026-11-04）
 
