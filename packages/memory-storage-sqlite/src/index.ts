@@ -560,6 +560,72 @@ export class SqliteStorage implements StoragePort {
       .run(meta.deletedAt, meta.deletedBy, meta.deleteReason, meta.tombstoneHash, meta.deletedAt, memoryId)
   }
 
+  listMemories(tenantId?: string): MemoryRecord[] {
+    const rows = tenantId
+      ? (this.db.prepare('SELECT * FROM memory WHERE tenant_id = ? ORDER BY created_at').all(tenantId) as Array<Record<string, unknown>>)
+      : (this.db.prepare('SELECT * FROM memory ORDER BY created_at').all() as Array<Record<string, unknown>>)
+    return rows.map(rowToRecord)
+  }
+
+  listSummaries(tenantId?: string): SummaryRecord[] {
+    const rows = tenantId
+      ? (this.db.prepare('SELECT * FROM topic_summary WHERE tenant_id = ? ORDER BY created_at').all(tenantId) as Array<Record<string, unknown>>)
+      : (this.db.prepare('SELECT * FROM topic_summary ORDER BY created_at').all() as Array<Record<string, unknown>>)
+    return rows.map(rowToSummary)
+  }
+
+  listConflicts(tenantId?: string): ConflictGroup[] {
+    const rows = tenantId
+      ? (this.db
+          .prepare('SELECT conflict_group_id FROM conflict_group WHERE tenant_id = ? ORDER BY fact_key')
+          .all(tenantId) as Array<{ conflict_group_id: string }>)
+      : (this.db.prepare('SELECT conflict_group_id FROM conflict_group ORDER BY fact_key').all() as Array<{
+          conflict_group_id: string
+        }>)
+    return rows
+      .map((row) => this.getConflictGroup(row.conflict_group_id))
+      .filter((group): group is ConflictGroup => group !== null)
+  }
+
+  listDecisions(): MemoryDecision[] {
+    const rows = this.db.prepare('SELECT * FROM memory_decision ORDER BY created_at').all() as Array<Record<string, unknown>>
+    return rows.map((row) => ({
+      decisionId: String(row.decision_id),
+      memoryId: String(row.memory_id),
+      topicId: String(row.topic_id),
+      factKey: String(row.fact_key),
+      decision: row.decision as MemoryDecision['decision'],
+      noveltyScore: Number(row.novelty_score),
+      coveredBy: String(row.covered_by),
+      judge: row.judge as MemoryDecision['judge'],
+      judgeVersion: String(row.judge_version),
+      reason: String(row.reason),
+      createdAt: String(row.created_at),
+    }))
+  }
+
+  clearAll(tenantId: string = 'default'): void {
+    this.tx(() => {
+      this.db.prepare('DELETE FROM memory WHERE tenant_id = ?').run(tenantId)
+      this.db
+        .prepare(
+          'DELETE FROM conflict_member WHERE conflict_group_id IN (SELECT conflict_group_id FROM conflict_group WHERE tenant_id = ?)',
+        )
+        .run(tenantId)
+      this.db.prepare('DELETE FROM conflict_group WHERE tenant_id = ?').run(tenantId)
+      this.db.prepare('DELETE FROM topic_summary WHERE tenant_id = ?').run(tenantId)
+      this.db.prepare('DELETE FROM memory_pending').run()
+      this.db.prepare('DELETE FROM memory_decision').run()
+      this.db.prepare('DELETE FROM memory_dependency').run()
+    })
+  }
+
+  purgeMemory(memoryId: string, purgedAt: string): void {
+    this.db
+      .prepare("UPDATE memory SET content = '', updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL")
+      .run(purgedAt, memoryId)
+  }
+
   close(): void {
     this.db.close()
   }

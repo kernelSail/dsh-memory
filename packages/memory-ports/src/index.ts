@@ -154,6 +154,16 @@ export interface StoragePort {
 
   /** 墓碑删除：置 deleted_at / TOMBSTONED，保留 tombstone_hash（§18） */
   forgetMemory(memoryId: string, meta: { deletedAt: string; deletedBy: string; deleteReason: string; tombstoneHash: string }): void
+
+  // —— 导出 / 导入（§20.7）——
+  listMemories(tenantId?: string): MemoryRecord[]
+  listSummaries(tenantId?: string): SummaryRecord[]
+  listConflicts(tenantId?: string): ConflictGroup[]
+  listDecisions(): MemoryDecision[]
+  /** 清空某租户全部记忆数据（replace 导入前调用） */
+  clearAll(tenantId?: string): void
+  /** 硬删内容：仅允许已 forget 的记录，保留 tombstone_hash 与审计 */
+  purgeMemory(memoryId: string, purgedAt: string): void
 }
 
 export interface LLMRequest {

@@ -94,4 +94,49 @@ describe('DSH 插件：真实接线', () => {
     expect(result?.degraded).toBe(true)
     plugin?.dispose()
   })
+
+  it('无用户消息时 systemPrompt 段返回空字符串', () => {
+    const fake = makeCtx(extraction)
+    const plugin = apply(fake.ctx, { dbPath: ':memory:' })
+    const section = fake.sections[0]
+    const text = typeof section?.text === 'function' ? section.text() : section?.text
+    expect(text).toBe('')
+    plugin?.dispose()
+  })
+
+  it('缺少 systemPrompt / tools 时不抛错（只注册可用服务）', () => {
+    const plugin = apply({}, { dbPath: ':memory:' })
+    expect(plugin).not.toBeNull()
+    plugin?.dispose()
+  })
+
+  it('提取失败（LLM 流抛错）时 afterTurn fail-open', async () => {
+    const ctx: DshContextLike = {
+      llm: {
+        async *stream() {
+          throw new Error('boom')
+        },
+      },
+    }
+    const plugin = apply(ctx, { dbPath: ':memory:' })
+    const result = await plugin?.adapter.afterTurn({
+      sessionId: 's',
+      turnId: 't',
+      messages: [{ role: 'user', content: 'hello' }],
+    })
+    expect(result?.ingested).toBe(0)
+    expect(result?.degraded).toBe(false)
+    plugin?.dispose()
+  })
+
+  it('memory_search 无命中返回空数组', async () => {
+    const fake = makeCtx(extraction)
+    const plugin = apply(fake.ctx, { dbPath: ':memory:' })
+    const tool = fake.tools[0] as unknown as {
+      execute(input: Record<string, unknown>): Promise<{ memories: unknown[] }>
+    }
+    const result = await tool.execute({ query: '完全不存在的主题' })
+    expect(result.memories).toHaveLength(0)
+    plugin?.dispose()
+  })
 })
