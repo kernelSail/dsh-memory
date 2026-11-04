@@ -101,6 +101,24 @@ async function api(path, options) {
   return payload
 }
 
+let lastDiagAt = 0
+/** 把页面侧的关键事实写到宿主日志，便于在没有 DevTools 的桌面壳里定位空白页。 */
+function sendDiag(payload) {
+  try {
+    const now = Date.now()
+    if (now - lastDiagAt < 800) return
+    lastDiagAt = now
+    fetch(API + '/diag', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(() => {})
+  } catch {
+    // 诊断失败不影响页面
+  }
+}
+
 function Stat(props) {
   return h('div', { style: styles.stat }, h('div', { style: styles.statValue }, String(props.value)), h('div', { style: styles.statLabel }, props.label))
 }
@@ -606,6 +624,8 @@ function MemorySpace(props) {
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
+  // 诊断：画布尺寸 / 节点数 / 是否有 2D 上下文（画布不可用时回退成 DOM 列表）
+  const [diag, setDiag] = React.useState({ w: 0, h: 0, nodes: 0, links: 0, ctx: true })
 
   React.useEffect(() => {
     selectedRef.current = selectedId
@@ -631,7 +651,9 @@ function MemorySpace(props) {
         setGraph(payload)
         setStats(payload.stats || null)
         setTruncated(Boolean(payload.truncated))
+        sendDiag({ where: 'graph', status: 'ok', nodes: payload.nodes?.length, links: payload.links?.length, stats: payload.stats })
       } catch (err) {
+        sendDiag({ where: 'graph', status: 'error', message: String(err && err.message ? err.message : err) })
         if (!cancelled) setError(String(err && err.message ? err.message : err))
       } finally {
         if (!cancelled) setLoading(false)
@@ -646,7 +668,9 @@ function MemorySpace(props) {
 
   React.useEffect(() => {
     if (!graph) return
-    layoutRef.current = buildLayout(graph)
+    const layout = buildLayout(graph)
+    layoutRef.current = layout
+    setDiag((prev) => ({ ...prev, nodes: layout.nodes.length, links: layout.links.length }))
     alphaRef.current = 1
     selectedRef.current = null
     setSelectedId(null)
@@ -659,6 +683,7 @@ function MemorySpace(props) {
     const wrap = wrapRef.current
     if (!canvas || !wrap) return
     const ctx = canvas.getContext('2d')
+    if (!ctx) setDiag((prev) => ({ ...prev, ctx: false }))
     let width = 0
     let height = 0
     const dpr = Math.min(2, window.devicePixelRatio || 1)
@@ -671,7 +696,18 @@ function MemorySpace(props) {
       canvas.height = Math.floor(height * dpr)
       canvas.style.width = `${width}px`
       canvas.style.height = `${height}px`
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx?.setTransform(dpr, 0, 0, dpr, 0, 0)
+      setDiag((prev) => (prev.w === width && prev.h === height ? prev : { ...prev, w: width, h: height }))
+      sendDiag({
+        where: 'resize',
+        w: width,
+        h: height,
+        dpr,
+        ctx: Boolean(ctx),
+        nodes: layoutRef.current.nodes.length,
+        links: layoutRef.current.links.length,
+        href: String(globalThis.location?.href ?? ''),
+      })
     }
     resize()
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null
@@ -683,7 +719,9 @@ function MemorySpace(props) {
         stepLayout(layout, alphaRef.current)
         alphaRef.current *= 0.993
       }
-      drawScene(ctx, width, height, layout, viewRef.current, selectedRef.current, hoverRef.current, queryRef.current)
+      if (ctx && width > 2 && height > 2) {
+        drawScene(ctx, width, height, layout, viewRef.current, selectedRef.current, hoverRef.current, queryRef.current)
+      }
       rafRef.current = requestAnimationFrame(frame)
     }
     rafRef.current = requestAnimationFrame(frame)
@@ -795,9 +833,23 @@ function MemorySpace(props) {
     }
   }
 
+  const degraded = diag.nodes > 0 && (!diag.ctx || diag.w < 40 || diag.h < 40)
+  const memoryNodes = graph ? graph.nodes.filter((node) => node.kind === 'memory') : []
+
   return h(
     'div',
-    { style: { position: 'relative', flex: 1, minHeight: 320, borderRadius: 10, overflow: 'hidden', background: 'radial-gradient(ellipse at 50% 42%, rgba(80,130,255,0.10), transparent 62%)' } },
+    {
+      style: {
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        minHeight: 380,
+        borderRadius: 10,
+        overflow: 'hidden',
+        background: 'radial-gradient(ellipse at 50% 42%, rgba(80,130,255,0.10), transparent 62%)',
+        border: '1px solid rgba(127,127,127,.16)',
+      },
+    },
     h('canvas', {
       ref: canvasRef,
       style: { display: 'block', width: '100%', height: '100%', cursor: hoverId ? 'pointer' : 'grab', touchAction: 'none' },
@@ -805,9 +857,59 @@ function MemorySpace(props) {
     h(
       'div',
       { style: { position: 'absolute', left: 10, top: 8, right: 10, display: 'flex', justifyContent: 'space-between', pointerEvents: 'none', fontSize: 11, opacity: 0.7 } },
-      h('span', null, stats ? `${stats.memories} 条记忆 · ${stats.entities} 个实体 · ${stats.topics} 个主题` : loading ? '加载中…' : ''),
-      h('span', null, truncated ? '数据已截断（最多 400 条）' : '拖拽旋转 · 滚轮缩放 · 点击节点查看'),
+      h(
+        'span',
+        null,
+        stats
+          ? `${stats.memories} 条记忆 · ${stats.entities} 个实体 · ${stats.topics} 个主题`
+          : loading
+            ? '加载中…'
+            : '暂无数据',
+      ),
+      h(
+        'span',
+        null,
+        truncated
+          ? '数据已截断（最多 400 条）'
+          : `${degraded ? '画布降级 · ' : ''}节点 ${diag.nodes} · 边 ${diag.links} · 画布 ${diag.w}×${diag.h}${diag.ctx ? '' : ' · 无2D'}`,
+      ),
     ),
+    degraded
+      ? h(
+          'div',
+          {
+            style: {
+              position: 'absolute',
+              left: 10,
+              right: 10,
+              top: 34,
+              bottom: 10,
+              overflowY: 'auto',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+            },
+          },
+          h('div', { style: { fontSize: 11, opacity: 0.7 } }, '画布不可用，已回退为节点列表：'),
+          memoryNodes.slice(0, 80).map((node) =>
+            h(
+              'button',
+              {
+                key: node.id,
+                style: {
+                  ...styles.button,
+                  textAlign: 'left',
+                  whiteSpace: 'normal',
+                  lineHeight: 1.4,
+                  ...(node.id === selectedId ? styles.chipActive : null),
+                },
+                onClick: () => setSelectedId(node.id),
+              },
+              `${node.topicId} · ${String(node.content || '').slice(0, 80)}`,
+            ),
+          ),
+        )
+      : null,
     error ? h('div', { style: { ...styles.error, position: 'absolute', left: 10, right: 10, bottom: 10 } }, error) : null,
     selectedNode && selectedNode.kind === 'memory'
       ? h(

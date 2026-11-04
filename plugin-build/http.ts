@@ -248,6 +248,26 @@ export function registerMemoryApi(ctx: any, plugin: PluginLike, log: (event: str
 
   webServer.register({
     kind: 'exact',
+    path: '/plugins/dsh-memory/diag',
+    handler: async (req, res) => {
+      if (!isLoopback(req)) return json(res, 403, { error: 'loopback only' })
+      if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
+      try {
+        const body = await bodyOf(req)
+        const line = JSON.stringify({ at: new Date().toISOString(), ...body }).slice(0, 8_000)
+        const fs = await import('node:fs')
+        const path = await import('node:path')
+        const file = path.join(process.env.USERPROFILE ?? '.', '.dsh', 'memory-ui-diag.log')
+        fs.appendFileSync(file, line + '\n')
+        json(res, 200, { ok: true })
+      } catch (error) {
+        json(res, 500, { error: String(error) })
+      }
+    },
+  })
+
+  webServer.register({
+    kind: 'exact',
     path: '/plugins/dsh-memory/forget',
     handler: async (req, res) => {
       if (!isLoopback(req)) return json(res, 403, { error: 'loopback only' })
