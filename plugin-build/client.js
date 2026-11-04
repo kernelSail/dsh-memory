@@ -617,6 +617,8 @@ function MemorySpace(props) {
   const [diag, setDiag] = React.useState({ w: 0, h: 0, nodes: 0, links: 0, ctx: true })
   // 全屏：脱离设置面板/右侧栏的容器限制，铺满整个应用窗口
   const [expanded, setExpanded] = React.useState(false)
+  // 交互计数：写进心跳日志，用于确认事件是否还在到达
+  const activityRef = React.useRef({ drags: 0, wheels: 0, moves: 0 })
 
   React.useEffect(() => {
     if (!expanded) return
@@ -712,9 +714,13 @@ function MemorySpace(props) {
     resize()
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null
     observer?.observe(wrap)
+    let lastFrameAt = performance.now()
+    const frames = { current: 0 }
 
     const frame = () => {
       const layout = layoutRef.current
+      lastFrameAt = performance.now()
+      frames.current++
       if (alphaRef.current > 0.004) {
         stepLayout(layout, alphaRef.current)
         alphaRef.current *= 0.993
@@ -724,10 +730,38 @@ function MemorySpace(props) {
       }
       rafRef.current = requestAnimationFrame(frame)
     }
+    lastFrameAt = performance.now()
     rafRef.current = requestAnimationFrame(frame)
+
+    // 心跳 + 看门狗：若 rAF 被浏览器/Electron 挂起，自动重启循环；
+    // 同时把帧数、缩放、交互计数写进诊断日志，便于定位"用一会儿就冻住"。
+    const heartbeat = setInterval(() => {
+      const stalled = Math.round(performance.now() - lastFrameAt)
+      sendDiag({
+        where: 'heartbeat',
+        frames: frames.current,
+        stalled,
+        alpha: Number(alphaRef.current.toFixed(3)),
+        zoom: Number(viewRef.current.zoom.toFixed(2)),
+        yaw: Number(viewRef.current.yaw.toFixed(2)),
+        drags: activityRef.current.drags,
+        wheels: activityRef.current.wheels,
+        moves: activityRef.current.moves,
+        nodes: layoutRef.current.nodes.length,
+        w: width,
+        h: height,
+        hidden: Boolean(document.hidden),
+      })
+      if (stalled > 1500) {
+        cancelAnimationFrame(rafRef.current)
+        lastFrameAt = performance.now()
+        rafRef.current = requestAnimationFrame(frame)
+      }
+    }, 3000)
 
     return () => {
       cancelAnimationFrame(rafRef.current)
+      clearInterval(heartbeat)
       observer?.disconnect()
     }
     // expanded 改变时 canvas 会经 portal 重建 DOM，必须重新初始化尺寸与循环
@@ -760,12 +794,14 @@ function MemorySpace(props) {
     if (!canvas || !wrap) return
     const onPointerDown = (event) => {
       if (event.button !== 0) return
+      activityRef.current.drags += 1
       dragRef.current = { x: event.clientX, y: event.clientY, yaw: viewRef.current.yaw, pitch: viewRef.current.pitch, moved: false }
       canvas.setPointerCapture?.(event.pointerId)
     }
     const onPointerMove = (event) => {
       const drag = dragRef.current
       if (drag && (event.buttons & 1)) {
+        activityRef.current.moves += 1
         const dx = event.clientX - drag.x
         const dy = event.clientY - drag.y
         if (Math.abs(dx) + Math.abs(dy) > 2) drag.moved = true
@@ -800,6 +836,7 @@ function MemorySpace(props) {
       // 所以这里挂在 wrap 上并用捕获阶段 + 非 passive。
       event.preventDefault()
       event.stopPropagation()
+      activityRef.current.wheels += 1
       const factor = Math.exp(-event.deltaY * 0.0022)
       const next = viewRef.current.zoom * factor
       viewRef.current.zoom = Math.max(0.12, Math.min(20, next))
