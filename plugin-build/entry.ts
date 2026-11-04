@@ -9,6 +9,7 @@
  */
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { registerMemoryApi } from './http.ts'
 
 const MARKER = join(process.env.USERPROFILE ?? '.', '.dsh', 'memory-plugin-load.json')
 const DEBUG = join(process.env.USERPROFILE ?? '.', '.dsh', 'memory-plugin-debug.log')
@@ -87,7 +88,14 @@ export async function apply(ctx: any, config: any = {}): Promise<unknown> {
   try {
     const mod = await import('../packages/memory-adapter-dsh/src/index.ts')
     const plugin = mod.apply(view as any, { ...mod.defaultConfig, ...(config ?? {}) })
-    writeMarker({ phase: 'loaded', ok: true, services, config: plugin?.config ?? null })
+    // 前端页面所需的数据接口（stats / list / forget / purge / export）
+    let http = false
+    try {
+      http = registerMemoryApi(ctx, plugin as any, debug)
+    } catch (error) {
+      debug('http-register-failed', { error: String(error) })
+    }
+    writeMarker({ phase: 'loaded', ok: true, services, http, config: plugin?.config ?? null })
     // cordis apply 的返回值必须是 effect（dispose 函数）或 undefined。
     // 返回异步 dispose：宿主关停时会等待在途提取/写入，headless 一次性运行才不丢数据。
     return async () => {

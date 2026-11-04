@@ -105,6 +105,27 @@ plugin-build/pkg/
 
 > 口径说明：实现目前只做规则判定（无模型兜底）与规则适用性验证，所以比设计文档附录 G 的 4,209/302 略低（实际 4,080/285）。
 
+## 前端页面（设置 → 记忆）
+
+插件带一个浏览器端页面，注册到 DSH 的 `settings.section` 插槽，入口在 **设置 → 记忆**（与壁纸插件的入口同一套机制）：
+
+- 统计：总数 / 活跃 / 已删除 / 主题数；
+- 检索：关键词（走 FTS）+ 主题筛选 + 「仅活跃 / 含已删除」切换；
+- 删除：墓碑删除（可恢复语义，摘要标记 stale）；已删除项可「彻底删除」（purge）；
+- 导出：NDJSON 下载（与 `exportNdjson` 同格式）。
+
+数据来自宿主插件注册的 `/plugins/dsh-memory/*` 路由（仅 loopback）：
+
+| 路由 | 说明 |
+|---|---|
+| `GET /plugins/dsh-memory/stats` | 统计与主题分布 |
+| `GET /plugins/dsh-memory/list?query=&topicId=&includeDeleted=&limit=` | 列表 / 检索 |
+| `POST /plugins/dsh-memory/forget` `{memoryId}` | 墓碑删除 |
+| `POST /plugins/dsh-memory/purge` `{memoryId}` | 硬删（需先 forget） |
+| `GET /plugins/dsh-memory/export` | NDJSON 导出 |
+
+构建产物：`pkg/lib/index.js`（宿主）+ `pkg/lib/client.js`（浏览器，包装成 DSH 的 `__ModuleLoader__` 工厂，`react` 走 externals）。
+
 ## 启用 / 关闭（本机）
 
 - 安装：profile 的 `node_modules/dsh-memory-plugin`（指向 `.local-plugins/`）+ `package.json` 的 `dsh.profile.bundles`；
